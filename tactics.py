@@ -176,7 +176,26 @@ class LayaBackend:
         pass
 
 
+class ConstBackend:
+    """A control, not a model: the same answer every time. If a model flies no better
+    than this, its judgments are not what is flying the course."""
+    sees_images = False
+
+    def __init__(self, maneuver="climb", risk=0.93, lost=0.45):
+        self.model = "const:" + maneuver
+        self.answer = {"maneuver": maneuver, "confidence": 0.0, "probabilities": {m: float(m == maneuver) for m in MANEUVERS},
+                       "risk": risk, "target_truly_lost": lost, "source": "laya"}
+
+    def ask(self, state, image=None):
+        return dict(self.answer), 0
+
+    def close(self):
+        pass
+
+
 def make_backend(name="jev", **kw):
+    if name.startswith("const:"):
+        return ConstBackend(name.split(":", 1)[1])
     if name == "jev":
         return JevBackend(**({"model": kw["model"]} if kw.get("model") else {}))
     if name == "laya":

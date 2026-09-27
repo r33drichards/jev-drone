@@ -42,6 +42,9 @@ CONFIGS = {
     "laya-text": (True, "laya", False, False),   # the same JSON Jev gets
     "laya-image": (True, "laya", True, False),   # JSON + the onboard camera frame
     "laya-text-lockstep": (True, "laya", False, True),   # sim waits for every answer: judgment without latency
+    # controls: the same answer every call, with laya's typical risk/lost values (~0.93 / ~0.45)
+    "always-climb": (True, "const:climb", False, False),
+    "always-hold": (True, "const:hold_course", False, False),
 }
 
 

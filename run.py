@@ -253,7 +253,7 @@ def episode(seed=0, seconds=35.0, use_jev=True, video=None, hz=None, budget=None
     tac = None
     if use_jev:
         from tactics import Tactician, DEFAULT, make_backend
-        be = make_backend(backend, model=laya_model if backend == "laya" else None,
+        be = make_backend(backend, model=laya_model if backend == "laya" else None,  # "const:<maneuver>" is a control
                           **({"use_image": laya_image} if backend == "laya" else {}))
         tac = Tactician(backend=be, lockstep=lockstep,
                         **{k: v for k, v in (("hz", hz), ("budget", budget)) if v})
@@ -394,7 +394,7 @@ if __name__ == "__main__":
     p.add_argument("--hz", type=float, default=None)
     p.add_argument("--budget", type=int, default=None)
     p.add_argument("--fast", action="store_true", help="run faster than real time (unfair to Jev)")
-    p.add_argument("--backend", choices=["jev", "laya"], default="jev", help="who answers the tactical questions")
+    p.add_argument("--backend", default="jev", help="jev, laya, or const:<maneuver> (a control)")
     p.add_argument("--laya-model", default=None, help="Hub id or local path (default: tactics.LAYA_MODEL)")
     p.add_argument("--laya-image", action="store_true", help="also give Laya the onboard camera frame")
     p.add_argument("--lockstep", action="store_true", help="pause the sim while the model decides (no latency)")
