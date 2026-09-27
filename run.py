@@ -160,7 +160,7 @@ class Guidance:
 
         # --- Jev's tactical commitment (advisory) --------------------------------
         acted = False
-        if (use_jev and judg["source"] == "jev" and judg["age_s"] < THRESH["stale_after_s"]
+        if (use_jev and judg["source"] in ("jev", "laya") and judg["age_s"] < THRESH["stale_after_s"]
                 and (decision_needed(scene) or self.climb_hold)):
             self.commit_left = max(0, self.commit_left - 1)
             if self.commit_left == 0 or judg["risk"] >= THRESH["override_risk"]:
