@@ -201,6 +201,42 @@ LAYOUTS = {
 SECONDS = 90.0
 
 
+def render(name, seed=0, directory=".", width=1400, height=320):
+    """Top-down view of a course with the rover's path dotted on, as PNG bytes."""
+    import io, mujoco
+    from PIL import Image, ImageDraw
+    c = make(name, seed)
+    m = mujoco.MjModel.from_xml_path(c.write(directory))
+    m.vis.map.zfar = 50.0                 # a fraction of stat.extent: see world.xml
+    d = mujoco.MjData(m)
+    d.qpos[:3] = [1.5, 0, 1.6]
+    mujoco.mj_forward(m, d)
+    r = mujoco.Renderer(m, height, width)
+    cam = mujoco.MjvCamera()
+    cam.type = mujoco.mjtCamera.mjCAMERA_FREE
+    span = c.end_x + 4.0
+    fovy = 30.0
+    m.vis.global_.fovy = fovy
+    cam.lookat[:] = [span / 2, 0, 0]
+    cam.elevation, cam.azimuth = -90.0, 90.0
+    cam.distance = (span / 2) / (np.tan(np.deg2rad(fovy) / 2) * width / height)
+    r.update_scene(d, cam)
+    img = Image.fromarray(r.render())
+    # world (x, y) -> pixel: x runs left to right, +y up
+    px = lambda x, y: (width / 2 + (x - span / 2) / span * width, height / 2 - y / span * width)  # noqa: E731
+    dr = ImageDraw.Draw(img)
+    for t in np.arange(0, (c.end_x - START_X) / ROVER_SPEED, 0.4):
+        x, y, _ = c.rover_pose(t)
+        u, v = px(x, y)
+        dr.ellipse([u - 2, v - 2, u + 2, v + 2], fill=(235, 40, 30))
+    for kind, x, side in c.stations:
+        u, _ = px(x, 0)
+        dr.text((u - 12, 4), kind, fill=(255, 255, 255))
+    buf = io.BytesIO()
+    img.save(buf, "PNG")
+    return buf.getvalue()
+
+
 def make(name, seed=0):
     stations, end_x = LAYOUTS[name]
     rng = np.random.default_rng(1000 + seed)

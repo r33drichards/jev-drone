@@ -103,25 +103,10 @@ def fly_cpu(config: str, seed: int, seconds: float, model: str = "", course: str
 
 @app.function(cpu=2, memory=4096, timeout=10 * 60)
 def render_course(course: str, seed: int):
-    """Top-down and chase-height views of a course, as PNG bytes."""
+    """Top-down view of a course, with the rover's path, as PNG bytes (courses.render)."""
     _enter()
-    import io, mujoco, numpy as np, courses
-    from PIL import Image
-    c = courses.make(course, seed)
-    m = mujoco.MjModel.from_xml_path(c.write("/root/jev"))
-    d = mujoco.MjData(m)
-    d.qpos[:3] = [1.5, 0, 1.6]
-    mujoco.mj_forward(m, d)
-    r = mujoco.Renderer(m, 360, 1400)
-    cam = mujoco.MjvCamera(); cam.type = mujoco.mjtCamera.mjCAMERA_FREE
-    cam.lookat[:] = [c.end_x / 2, 0, 0]; cam.distance, cam.elevation, cam.azimuth = c.end_x * 0.62, -89.9, 90.0
-    m.vis.global_.fovy = 50
-    r.update_scene(d, cam)
-    top = r.render()
-    # rover path, drawn as dots in the top view
-    img = Image.fromarray(top)
-    buf = io.BytesIO(); img.save(buf, "PNG")
-    return buf.getvalue()
+    import courses
+    return courses.render(course, seed, "/root/jev")
 
 
 def _outdir():
