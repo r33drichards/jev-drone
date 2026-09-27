@@ -79,13 +79,13 @@ def scenes_remote(model: str = "", variants=(("full budgets, no image", []),)):
 
 
 @app.function(gpu=["L4", "A10G"], cpu=4, memory=16384, timeout=60 * 60, volumes={"/cache/hf": hf_vol})
-def fly(config: str, seed: int, seconds: float, model: str = "", course: str = "classic"):
+def fly(config: str, seed: int, seconds: float, model: str = "", course: str = "classic", budget: int = 0):
     _enter()
     import run
     use_model, backend, img, lockstep = CONFIGS[config]
     t0 = time.time()
     r = run.episode(seed, seconds, use_jev=use_model, backend=backend, laya_model=model or None,
-                    laya_image=img, lockstep=lockstep, course=course)
+                    laya_image=img, lockstep=lockstep, course=course, budget=budget or None)
     r.update(config=config, wall_s=round(time.time() - t0, 1))
     try:
         import torch
@@ -96,9 +96,9 @@ def fly(config: str, seed: int, seconds: float, model: str = "", course: str = "
 
 
 @app.function(cpu=4, memory=8192, timeout=60 * 60)
-def fly_cpu(config: str, seed: int, seconds: float, model: str = "", course: str = "classic"):
+def fly_cpu(config: str, seed: int, seconds: float, model: str = "", course: str = "classic", budget: int = 0):
     """The controls (no-model, const:*) never load a model, so they need no GPU."""
-    return fly.local(config, seed, seconds, model, course)
+    return fly.local(config, seed, seconds, model, course, budget)
 
 
 @app.function(cpu=2, memory=4096, timeout=10 * 60)
@@ -160,12 +160,14 @@ def scenes(model: str = "", all_variants: bool = True):
 
 @app.local_entrypoint()
 def baseline(configs: str = "no-model,laya-text,laya-image,laya-text-lockstep", seeds: str = "0,1,2",
-             seconds: float = 65.0, model: str = "", courses: str = "classic"):
+             seconds: float = 65.0, model: str = "", courses: str = "classic", budget: int = 0):
+    """`budget` caps model calls per flight; 0 keeps tactics.THRESHOLDS["call_budget"] (160, sized
+    for the 65 s classic flight). Scale it with --seconds, or a long flight runs out mid-course."""
     jobs = [(c, int(s), k) for k in courses.split(",") for c in configs.split(",") for s in seeds.split(",")]
     d = _outdir()
     path = os.path.join(d, "episodes.jsonl")
     gpu = lambda c: CONFIGS[c][0] and not CONFIGS[c][1].startswith("const:")  # noqa: E731
-    calls = [(fly if gpu(c) else fly_cpu).spawn(c, s, seconds, model, k) for c, s, k in jobs]
+    calls = [(fly if gpu(c) else fly_cpu).spawn(c, s, seconds, model, k, budget) for c, s, k in jobs]
     for r in (_get(fc) for fc in calls):
         if isinstance(r, Exception):
             print("FAILED:", repr(r)[:300])

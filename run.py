@@ -20,7 +20,7 @@ CHASE_FOVY = 50.0        # cinematic lens for the third-person render
 CLIMB_ALT = 3.0          # beams top out at 2.1; this clears them with margin
 CLIMB_HOLD_STEPS = 90    # ~1.8 s at 50 Hz guidance
 REFLEX_M = 2.2           # code-owned: below this, Jev's opinion is irrelevant
-TRACE = bool(os.environ.get("TRACE"))
+TRACE = int(os.environ.get("TRACE") or 0)   # 1: every judgment change; 2: also the state twice a second
 
 
 ROVER_SPEED = 1.15
@@ -330,6 +330,16 @@ def episode(seed=0, seconds=35.0, use_jev=True, video=None, hz=None, budget=None
                              scene["free_ahead_above_m"], scene["target"]["visible"]),
                           flush=True)
             v_des, yaw_cmd, acted, reflex = guide(scene, judg, yaw, pos[2], use_jev, fresh, t, pos)
+            if TRACE >= 2 and i % 250 == 0:
+                sec = scene["sector_range_m"]
+                print("    t=%5.1f pos=(%5.1f,%5.1f,%4.1f) yaw=%4.0f mv=%-11s commit=%-11s reflex=%d v=(%4.1f,%4.1f,%4.1f)"
+                      " sec=[%s] path=%.1f above=%.1f level=%.1f tgt=%s"
+                      % (t, *pos, np.rad2deg(yaw), judg.get("maneuver"), guide.commit, reflex, *v_des,
+                         " ".join("%4.1f" % v for v in sec.values()), scene["path_ahead_m"],
+                         scene["free_ahead_above_m"], scene["free_ahead_level_m"],
+                         "%+.0f@%.1f" % (scene["target"]["bearing_deg"], scene["target"]["range_m"])
+                         if scene["target"]["visible"] else "lost %.1fs" % (scene["target"]["unseen_for_s"] or 0)),
+                      flush=True)
             fresh = False
             jev_steps += acted
             reflex_steps += reflex
