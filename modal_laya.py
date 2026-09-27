@@ -124,6 +124,17 @@ def fly_gif(config: str, seed: int, seconds: float, course: str, budget: int = 0
     return r, flightgif.make_gif(rec, course, seed, title, "/root/jev")
 
 
+@app.function(gpu=["L4", "A10G"], cpu=4, memory=16384, timeout=60 * 60, volumes={"/cache/hf": hf_vol})
+def probe_remote(frames: dict, rows: list, model: str = "", n_permutations: int = 1):
+    """probe.py: ask Laya where the rover is in each recorded frame."""
+    _enter()
+    import laya, probe
+    agent = laya.load_vlm(model or "thaitea/laya-vision", option_max_len=256, head_max_len=1024, max_len=3072)
+    preds = probe.evaluate(agent, frames, rows, n_permutations)
+    # as JSON text: numpy scalars would not unpickle where the Modal client has no numpy
+    return json.dumps(preds, default=float), json.dumps(probe.score(preds), default=float)
+
+
 def _outdir():
     d = os.path.join(HERE, "results", "laya", time.strftime("%Y%m%d-%H%M%S"))
     os.makedirs(d, exist_ok=True)
@@ -168,6 +179,22 @@ def gifs(config: str = "laya-image", courses: str = "pockets,mixed", seeds: str 
             f.write(json.dumps(r) + "\n")
         print("%-8s seed=%d %-8s max_x=%5.1f vis=%4.1f%% rt=%.2f gif=%dKB"
               % (k, s, tag, r["max_x_m"], r["target_visible_pct"], r["realtime_factor"], len(gif) // 1024), flush=True)
+
+
+@app.local_entrypoint()
+def probe(frames: str = "/tmp/probe", model: str = "", n_permutations: int = 1):
+    """Score zero-shot Laya on frames from `python probe.py collect --out <frames>`."""
+    rows = [json.loads(l) for l in open(os.path.join(frames, "labels.jsonl"))]
+    blobs = {r["frame"]: open(os.path.join(frames, "frames", r["frame"]), "rb").read() for r in rows}
+    preds, summary = (json.loads(x) for x in probe_remote.remote(blobs, rows, model, n_permutations))
+    d = os.path.join(HERE, "results", "probe")
+    os.makedirs(d, exist_ok=True)
+    tag = "perm%d" % n_permutations
+    with open(os.path.join(d, "preds-%s.jsonl" % tag), "w") as f:
+        for p in preds:
+            f.write(json.dumps(p) + "\n")
+    json.dump(summary, open(os.path.join(d, "summary-%s.json" % tag), "w"), indent=1)
+    print(json.dumps(summary, indent=1))
 
 
 @app.local_entrypoint()
