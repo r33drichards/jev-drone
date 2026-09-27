@@ -235,7 +235,10 @@ class Guidance:
 
 
 def episode(seed=0, seconds=35.0, use_jev=True, video=None, hz=None, budget=None, realtime=True,
-            backend="jev", laya_model=None, laya_image=False, lockstep=False, course="classic"):
+            backend="jev", laya_model=None, laya_image=False, lockstep=False, course="classic", record=None):
+    """`record`: a list to append a snapshot to every 0.2 s of sim time (pose, obstacles,
+    judgment, and the camera frame the model saw), for rendering after the flight
+    (flightgif.py). Cheap, so the flight stays real time."""
     rng = np.random.default_rng(seed)
     if course == "classic":
         m = mujoco.MjModel.from_xml_path("world.xml")
@@ -367,6 +370,16 @@ def episode(seed=0, seconds=35.0, use_jev=True, video=None, hz=None, budget=None
                 break
         else:
             grounded = max(0, grounded - 2)
+
+        if record is not None and i % 100 == 0 and scene:    # 5 snapshots per sim second
+            rgb = eye.last_rgb
+            record.append({"t": t, "qpos": d.qpos.copy(), "mocap_pos": d.mocap_pos.copy(),
+                           "mocap_quat": d.mocap_quat.copy(), "yaw": yaw,
+                           "judg": {k: judg.get(k) for k in ("maneuver", "confidence", "risk",
+                                                             "target_truly_lost", "source", "age_s")},
+                           "reflex": bool(scene["path_ahead_m"] < REFLEX_M), "climbing": bool(guide.climb_hold),
+                           "target_visible": bool(scene["target"]["visible"]), "hits": hits,
+                           "rgb": None if rgb is None else rgb[::2, ::2].copy()})
 
         if writer and i % 17 == 0 and scene:              # 30 fps video
             cam.lookat[:] = pos

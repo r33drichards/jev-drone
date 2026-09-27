@@ -109,6 +109,21 @@ def render_course(course: str, seed: int):
     return courses.render(course, seed, "/root/jev")
 
 
+@app.function(gpu=["L4", "A10G"], cpu=4, memory=16384, timeout=60 * 60, volumes={"/cache/hf": hf_vol})
+def fly_gif(config: str, seed: int, seconds: float, course: str, budget: int = 0, model: str = ""):
+    """fly(), recording the flight, then render it as a GIF (flightgif.py) after the flight ends."""
+    _enter()
+    import run, flightgif
+    use_model, backend, img, lockstep = CONFIGS[config]
+    rec = []
+    r = run.episode(seed, seconds, use_jev=use_model, backend=backend, laya_model=model or None,
+                    laya_image=img, lockstep=lockstep, course=course, budget=budget or None, record=rec)
+    r.update(config=config)
+    outcome = "finished" if r["finished_at_s"] is not None else "stopped at x=%.0f m" % r["max_x_m"]
+    title = "%s  |  %s seed %d  |  %s" % (config, course, seed, outcome)
+    return r, flightgif.make_gif(rec, course, seed, title, "/root/jev")
+
+
 def _outdir():
     d = os.path.join(HERE, "results", "laya", time.strftime("%Y%m%d-%H%M%S"))
     os.makedirs(d, exist_ok=True)
@@ -129,6 +144,30 @@ def courses_png(names: str = "pockets,mixed,no-climb", seed: int = 0):
         path = os.path.join(d, "course-%s.png" % n)
         open(path, "wb").write(render_course.remote(n, seed))
         print("wrote", path)
+
+
+@app.local_entrypoint()
+def gifs(config: str = "laya-image", courses: str = "pockets,mixed", seeds: str = "0,1,2,3,4,5",
+         seconds: float = 90.0, budget: int = 240):
+    """Fly and record every (course, seed); write docs/gifs/<config>-<course>-<seed>-<outcome>.gif."""
+    d = os.path.join(HERE, "docs", "gifs")
+    os.makedirs(d, exist_ok=True)
+    jobs = [(k, int(s)) for k in courses.split(",") for s in seeds.split(",")]
+    calls = [fly_gif.spawn(config, s, seconds, k, budget) for k, s in jobs]
+    out = _outdir()
+    for (k, s), fc in zip(jobs, calls):
+        res = _get(fc)
+        if isinstance(res, Exception):
+            print("FAILED", k, s, repr(res)[:300])
+            continue
+        r, gif = res
+        tag = "finished" if r["finished_at_s"] is not None else "stuck"
+        path = os.path.join(d, "%s-%s-seed%d-%s.gif" % (config, k, s, tag))
+        open(path, "wb").write(gif)
+        with open(os.path.join(out, "episodes.jsonl"), "a") as f:
+            f.write(json.dumps(r) + "\n")
+        print("%-8s seed=%d %-8s max_x=%5.1f vis=%4.1f%% rt=%.2f gif=%dKB"
+              % (k, s, tag, r["max_x_m"], r["target_visible_pct"], r["realtime_factor"], len(gif) // 1024), flush=True)
 
 
 @app.local_entrypoint()
