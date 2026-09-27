@@ -186,8 +186,16 @@ class ConstBackend:
         self.answer = {"maneuver": maneuver, "confidence": 0.0, "probabilities": {m: float(m == maneuver) for m in MANEUVERS},
                        "risk": risk, "target_truly_lost": lost, "source": "laya"}
 
+    def bind(self, answer_fn):
+        """`const:oracle`: answer from the course layout (courses.Course.oracle) instead."""
+        self.answer_fn = answer_fn
+
     def ask(self, state, image=None):
-        return dict(self.answer), 0
+        fn = getattr(self, "answer_fn", None)
+        if fn is None:
+            return dict(self.answer), 0
+        mv = fn()
+        return dict(self.answer, maneuver=mv, probabilities={m: float(m == mv) for m in MANEUVERS}), 0
 
     def close(self):
         pass

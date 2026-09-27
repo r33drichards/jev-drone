@@ -235,9 +235,16 @@ class Guidance:
 
 
 def episode(seed=0, seconds=35.0, use_jev=True, video=None, hz=None, budget=None, realtime=True,
-            backend="jev", laya_model=None, laya_image=False, lockstep=False):
+            backend="jev", laya_model=None, laya_image=False, lockstep=False, course="classic"):
     rng = np.random.default_rng(seed)
-    m = mujoco.MjModel.from_xml_path("world.xml")
+    if course == "classic":
+        m = mujoco.MjModel.from_xml_path("world.xml")
+        drive, rover_at, barrier_x, end_x, oracle = drive_course, rover_pose, 19.0, 77.0, None
+    else:
+        import courses
+        c = courses.make(course, seed)
+        m = mujoco.MjModel.from_xml_path(c.write(os.path.dirname(os.path.abspath(__file__))))
+        drive, rover_at, barrier_x, end_x, oracle = c.drive, c.rover_pose, c.first_barrier_x, c.end_x, c.oracle
     d = mujoco.MjData(m)
     dt = m.opt.timestep
     x2 = m.body("x2").id
@@ -257,6 +264,10 @@ def episode(seed=0, seconds=35.0, use_jev=True, video=None, hz=None, budget=None
                           **({"use_image": laya_image} if backend == "laya" else {}))
         tac = Tactician(backend=be, lockstep=lockstep,
                         **{k: v for k, v in (("hz", hz), ("budget", budget)) if v})
+        if backend == "const:oracle":
+            if oracle is None:
+                raise ValueError("const:oracle needs a course from courses.py")
+            be.bind(lambda: oracle(d.qpos[:3]))
         judg = dict(DEFAULT)
     else:
         judg = {"maneuver": "hold_course", "risk": 0.0, "confidence": 0.0,
@@ -276,7 +287,7 @@ def episode(seed=0, seconds=35.0, use_jev=True, video=None, hz=None, budget=None
     v_des, yaw_cmd = np.zeros(3), 0.0
     scene, fresh = None, False
     vis, frames, standoffs, hits, hit_steps, grounded = 0, 0, [], 0, set(), 0
-    crashed_at, max_x, crossed = None, -99.0, False
+    crashed_at, max_x, crossed, finished_at = None, -99.0, False, None
     jev_steps = reflex_steps = 0
     n = int(seconds / dt)
 
@@ -289,7 +300,7 @@ def episode(seed=0, seconds=35.0, use_jev=True, video=None, hz=None, budget=None
             lag = t - (time.time() - wall0)
             if lag > 0.0005:
                 time.sleep(lag)
-        drive_course(m, d, t)
+        drive(m, d, t)
 
         pos = d.qpos[:3].copy()
         quat = d.qpos[3:7]
@@ -333,10 +344,12 @@ def episode(seed=0, seconds=35.0, use_jev=True, video=None, hz=None, budget=None
                 if obj not in hit_steps:
                     hit_steps.add(obj); hits += 1
 
-        standoffs.append(float(np.linalg.norm(pos - rover_pose(t))))
+        standoffs.append(float(np.linalg.norm(pos - rover_at(t))))
         max_x = max(max_x, float(pos[0]))
-        if pos[0] > 19.8:      # past beam0 (x=19), the barrier the baseline cannot pass
+        if pos[0] > barrier_x + 0.8:      # past the first barrier (beam0 at x=19 on the classic course)
             crossed = True
+        if finished_at is None and pos[0] >= end_x:
+            finished_at = t
         if pos[2] < 0.35:
             grounded += 1
             if grounded > 750:          # 1.5 s on the deck: it is down and not coming back
@@ -375,7 +388,8 @@ def episode(seed=0, seconds=35.0, use_jev=True, video=None, hz=None, budget=None
            "distance_flown_m": round(float(np.linalg.norm(d.qpos[:3] - np.array([1.5, 0, CRUISE_ALT]))), 1),
            "steps_jev_acted_pct": round(100 * jev_steps / (n / 10), 1),
            "steps_reflex_pct": round(100 * reflex_steps / (n / 10), 1),
-           "max_x_m": round(max_x, 1), "crossed_barrier": crossed, "crashed_at_s": crashed_at, "flew_s": round(len(standoffs) * dt, 1),
+           "max_x_m": round(max_x, 1), "crossed_barrier": crossed, "course": course, "end_x_m": end_x,
+           "finished_at_s": None if finished_at is None else round(finished_at, 1), "crashed_at_s": crashed_at, "flew_s": round(len(standoffs) * dt, 1),
            # sim seconds per wall second; below 1 means the box could not keep up, which hands the
            # decision model extra time (lockstep pauses are excluded, since wall0 absorbs them)
            "realtime_factor": round(len(standoffs) * dt / max(time.time() - wall0, 1e-9), 2)}
@@ -399,10 +413,11 @@ if __name__ == "__main__":
     p.add_argument("--laya-image", action="store_true", help="also give Laya the onboard camera frame")
     p.add_argument("--lockstep", action="store_true", help="pause the sim while the model decides (no latency)")
     p.add_argument("--out", default=None, help="append one JSON line per episode to this file")
+    p.add_argument("--course", default="classic", help="classic (world.xml) or a layout in courses.py")
     a = p.parse_args()
     for s in a.seeds:
         r = episode(s, a.seconds, not a.no_jev, a.video, a.hz, a.budget, realtime=not a.fast,
-                    backend=a.backend, laya_model=a.laya_model, laya_image=a.laya_image, lockstep=a.lockstep)
+                    backend=a.backend, laya_model=a.laya_model, laya_image=a.laya_image, lockstep=a.lockstep, course=a.course)
         print(json.dumps(r))
         sys.stdout.flush()
         if a.out:
