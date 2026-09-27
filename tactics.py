@@ -7,11 +7,17 @@ number that changes how the aircraft reacts to a judgment.
 Runs off the control loop in a worker thread. The flight code never blocks on it
 and never *needs* it -- it reads whatever judgment is currently cached, and the
 reflex layer in run.py owns safety regardless of what comes back.
+
+Two backends answer the same questions: Jev over the TypeSafe API (JSON only), or
+Laya Vision (https://github.com/r33drichards/laya-vision) run locally, which can
+also see the onboard camera frame.
 """
 import os, threading, queue, time
-from typesafe_sdk import TypeSafeClient, Choice, Noul, Score
 
 MODEL = "jev-latest"
+LAYA_MODEL = "thaitea/laya-vision"
+# Laya's per-option token cap defaults to 48; these budgets keep every rubric below whole.
+LAYA_BUDGETS = {"option_max_len": 256, "head_max_len": 1024, "max_len": 3072}
 
 # --- how the flight code reacts to a judgment -------------------------------
 THRESHOLDS = {
@@ -65,26 +71,29 @@ MANEUVERS = {
 }
 
 QUESTIONS = {
-    "maneuver": Choice(
-        instructions={
+    "maneuver": {
+        "type": "choice",
+        "instructions": {
             "role": "You are the tactical decision layer of an autonomous quadrotor.",
             "mission": MISSION,
             "ask": "Which single maneuver should the drone commit to right now?",
         },
-        criteria=MANEUVERS,
-    ),
-    "risk": Score(
-        instructions="How dangerous is the drone's immediate situation?",
-        criteria=["clear and open", "tight but manageable", "about to hit something"],
-    ),
-    "target_truly_lost": Noul(
-        instructions=(
+        "criteria": MANEUVERS,
+    },
+    "risk": {
+        "type": "score",
+        "instructions": "How dangerous is the drone's immediate situation?",
+        "criteria": ["clear and open", "tight but manageable", "about to hit something"],
+    },
+    "target_truly_lost": {
+        "type": "noul",
+        "instructions": (
             "Has the drone genuinely lost the rover? Judge from unseen_for_s: a fraction "
             "of a second behind a pillar is a normal occlusion, several seconds of nothing "
             "in an open scene means the chase line is stale."),
-        criteria={"true": "Give up the remembered bearing and sweep to search.",
-                  "false": "Keep flying the last known bearing; it should reappear."},
-    ),
+        "criteria": {"true": "Give up the remembered bearing and sweep to search.",
+                     "false": "Keep flying the last known bearing; it should reappear."},
+    },
 }
 
 
@@ -101,23 +110,99 @@ def build_state(scene):
     return {"mission": MISSION, "aircraft": AIRCRAFT, "observed": scene}
 
 
+class JevBackend:
+    """Jev over the TypeSafe API. Takes JSON only; an image is ignored."""
+    sees_images = False
+
+    def __init__(self, model=MODEL):
+        from typesafe_sdk import TypeSafeClient, Choice, Noul, Score
+        key = os.environ.get("TYPESAFE_API_KEY") or os.environ.get("JEV_API_KEY")
+        if not key:
+            raise RuntimeError("set TYPESAFE_API_KEY (see .env.example)")
+        self.client = TypeSafeClient(api_key=key)
+        self.model = model
+        kinds = {"choice": Choice, "score": Score, "noul": Noul}
+        self.questions = {k: kinds[q["type"]](instructions=q["instructions"], criteria=q["criteria"])
+                          for k, q in QUESTIONS.items()}
+
+    def ask(self, state, image=None):
+        r = self.client.system_one(state=state, model=self.model, questions=self.questions)
+        a = r.answers
+        return {
+            "maneuver": a["maneuver"].choice,
+            "confidence": round(a["maneuver"].confidence, 3),
+            "probabilities": {k: round(v, 3) for k, v in a["maneuver"].probabilities.items()},
+            "risk": round(a["risk"].score, 2),
+            "target_truly_lost": round(a["target_truly_lost"].noul, 3),
+            "source": "jev",
+        }, r.usage.input_tokens + r.usage.output_tokens
+
+    def close(self):
+        try:
+            self.client.close()
+        except Exception:
+            pass
+
+
+class LayaBackend:
+    """Laya Vision, loaded in-process. Same questions; with `use_image` the onboard
+    camera frame goes in beside the JSON state."""
+
+    def __init__(self, model=LAYA_MODEL, use_image=False, device=None, revision=None, **budgets):
+        import laya
+        self.agent = laya.load_vlm(model, device=device, revision=revision, **dict(LAYA_BUDGETS, **budgets))
+        self.model = model + (" +image" if use_image else "")
+        self.sees_images = use_image
+        self.truncated = 0
+
+    def ask(self, state, image=None):
+        if self.sees_images and image is not None:
+            from PIL import Image
+            state = dict(state, image=Image.fromarray(image) if not isinstance(image, Image.Image) else image)
+        r = self.agent.predict(state, QUESTIONS)
+        a = r["answers"]
+        if any("truncated" in v for v in a.values()):
+            self.truncated += 1
+        return {
+            "maneuver": a["maneuver"]["choice"],
+            "confidence": round(float(a["maneuver"]["confidence"]), 3),
+            "probabilities": {k: round(float(v), 3) for k, v in a["maneuver"]["probabilities"].items()},
+            "risk": round(float(a["risk"]["score"]), 2),
+            "target_truly_lost": round(float(a["target_truly_lost"]["noul"]), 3),
+            "source": "laya",
+        }, r["usage"]["input_tokens"]
+
+    def close(self):
+        pass
+
+
+def make_backend(name="jev", **kw):
+    if name == "jev":
+        return JevBackend(**({"model": kw["model"]} if kw.get("model") else {}))
+    if name == "laya":
+        return LayaBackend(**{k: v for k, v in kw.items() if v is not None})
+    raise ValueError("backend must be jev or laya, got %r" % name)
+
+
 DEFAULT = {"maneuver": "hold_course", "risk": 0.0, "confidence": 0.0,
            "target_truly_lost": 0.0, "source": "default", "age_s": 0.0,
            "probabilities": {}}
 
 
 class Tactician:
-    """Asks Jev for a judgment at most `hz` times a second, and only when the
-    scene has actually changed enough to be worth a call."""
+    """Asks the backend for a judgment at most `hz` times a second, and only when the
+    scene has actually changed enough to be worth a call.
 
-    def __init__(self, hz=THRESHOLDS["call_hz"], budget=THRESHOLDS["call_budget"], model=MODEL):
-        key = os.environ.get("TYPESAFE_API_KEY") or os.environ.get("JEV_API_KEY")
-        if not key:
-            raise RuntimeError("set TYPESAFE_API_KEY (see .env.example)")
-        self.client = TypeSafeClient(api_key=key)
+    `lockstep` makes offer() wait for the answer: the sim stands still while the
+    model thinks, which measures judgment quality with latency taken out."""
+
+    def __init__(self, hz=THRESHOLDS["call_hz"], budget=THRESHOLDS["call_budget"], backend=None, lockstep=False):
+        self.backend = backend or JevBackend()
         self.min_dt = 1.0 / hz
         self.budget = budget
-        self.model = model
+        self.model = self.backend.model
+        self.lockstep = lockstep
+        self._done = threading.Event()
         self.calls = 0
         self.attempts = 0
         self.skipped = 0
@@ -152,8 +237,8 @@ class Tactician:
             (t["unseen_for_s"] or 0) > 2.0,
         )
 
-    def offer(self, scene, now):
-        """Non-blocking. Hand the latest scene over if it's worth a call."""
+    def offer(self, scene, now, image=None):
+        """Non-blocking (unless lockstep). Hand the latest scene over if it's worth a call."""
         self.n_offer += 1
         if self.attempts >= self.budget or now - self._last_sent < self.min_dt:
             self.n_ratelimited += 1
@@ -163,10 +248,14 @@ class Tactician:
             self.skipped += 1
             return
         try:
-            self._q.put_nowait((scene, now))
+            self._done.clear()
+            self._q.put_nowait((scene, now, image))
             self._last_sent, self._last_key = now, key
         except queue.Full:
             self.n_full += 1
+            return
+        if self.lockstep:
+            self._done.wait()
 
     def read(self, now):
         with self._lock:
@@ -177,23 +266,14 @@ class Tactician:
     def _worker(self):
         while not self._stop.is_set():
             try:
-                scene, now = self._q.get(timeout=0.2)
+                scene, now, image = self._q.get(timeout=0.2)
             except queue.Empty:
                 continue
             t0 = time.time()
             self.attempts += 1  # counts against the budget whether or not the call succeeds
             try:
-                r = self.client.system_one(state=build_state(scene), model=self.model, questions=QUESTIONS)
-                a = r.answers
-                judgment = {
-                    "maneuver": a["maneuver"].choice,
-                    "confidence": round(a["maneuver"].confidence, 3),
-                    "probabilities": {k: round(v, 3) for k, v in a["maneuver"].probabilities.items()},
-                    "risk": round(a["risk"].score, 2),
-                    "target_truly_lost": round(a["target_truly_lost"].noul, 3),
-                    "source": "jev",
-                }
-                self.tokens += r.usage.input_tokens + r.usage.output_tokens
+                judgment, tokens = self.backend.ask(build_state(scene), image)
+                self.tokens += tokens
                 self.calls += 1
                 self.latency.append(time.time() - t0)
                 with self._lock:
@@ -207,18 +287,18 @@ class Tactician:
                 self._last_key = None
                 with self._lock:
                     self._latest = dict(DEFAULT, source=f"error:{type(e).__name__}")
+            finally:
+                self._done.set()
 
     def close(self):
         self._stop.set()
         self._thread.join(timeout=1.0)
-        try:
-            self.client.close()
-        except Exception:
-            pass
+        self.backend.close()
 
     def stats(self):
         lat = sorted(self.latency)
-        return {"calls": self.calls, "attempts": self.attempts, "skipped_unchanged": self.skipped, "errors": self.errors,
+        return {"backend": self.model, "lockstep": self.lockstep,
+                "truncated_calls": getattr(self.backend, "truncated", None), "calls": self.calls, "attempts": self.attempts, "skipped_unchanged": self.skipped, "errors": self.errors,
                 "last_error": self.last_error, "tokens": self.tokens,
                 "offers": self.n_offer, "rate_limited": self.n_ratelimited, "queue_full": self.n_full,
                 "median_latency_s": round(lat[len(lat) // 2], 3) if lat else None,

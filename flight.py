@@ -177,7 +177,7 @@ class Eye:
 
     def __init__(self, model, target_body="rover", ignore_below=IGNORE_BELOW_DEFAULT,
                  floor_geom="floor", shell=(), threat_fov=None, n_sectors=None,
-                 walls=()):
+                 walls=(), rgb_size=None):
         self.ignore_below = ignore_below
         # The tunnel shell is the environment, not an obstacle. Reported separately
         # as clearances, or it swamps every sector and the scene says nothing.
@@ -191,6 +191,10 @@ class Eye:
         self.depth.enable_depth_rendering()
         self.seg = mujoco.Renderer(model, self.H, self.W)
         self.seg.enable_segmentation_rendering()
+        # Optional colour frame from the same camera, for a decision model that can see.
+        # Not used by the symbolic scene; rendered only when asked for.
+        self.rgb = mujoco.Renderer(model, rgb_size[1], rgb_size[0]) if rgb_size else None
+        self.last_rgb = None
         self.cam = mujoco.MjvCamera()
         self.cam.type = mujoco.mjtCamera.mjCAMERA_FREE
         self.cam.distance = 1.0
@@ -236,6 +240,9 @@ class Eye:
         z = np.clip(self.depth.render(), 0.0, self.MAX_RANGE)
         self.seg.update_scene(data, self.cam)
         seg = self.seg.render()[:, :, 0]
+        if self.rgb is not None:
+            self.rgb.update_scene(data, self.cam)
+            self.last_rgb = self.rgb.render()
 
         # --- free space: ignore the floor, keep only real vertical obstructions
         obstacle = (seg != self.floor_id) & (seg >= 0)

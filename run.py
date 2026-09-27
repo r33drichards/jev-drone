@@ -234,7 +234,8 @@ class Guidance:
         return v_world, yaw_cmd, acted, reflex
 
 
-def episode(seed=0, seconds=35.0, use_jev=True, video=None, hz=None, budget=None, realtime=True):
+def episode(seed=0, seconds=35.0, use_jev=True, video=None, hz=None, budget=None, realtime=True,
+            backend="jev", laya_model=None, laya_image=False, lockstep=False):
     rng = np.random.default_rng(seed)
     m = mujoco.MjModel.from_xml_path("world.xml")
     d = mujoco.MjData(m)
@@ -247,12 +248,15 @@ def episode(seed=0, seconds=35.0, use_jev=True, video=None, hz=None, budget=None
     mujoco.mj_forward(m, d)
 
     pilot = flight.Pilot(m)
-    eye = flight.Eye(m)
+    eye = flight.Eye(m, rgb_size=(512, 384) if (use_jev and laya_image) else None)
     guide = Guidance(eye)
     tac = None
     if use_jev:
-        from tactics import Tactician, DEFAULT
-        tac = Tactician(**{k: v for k, v in (("hz", hz), ("budget", budget)) if v})
+        from tactics import Tactician, DEFAULT, make_backend
+        be = make_backend(backend, model=laya_model if backend == "laya" else None,
+                          **({"use_image": laya_image} if backend == "laya" else {}))
+        tac = Tactician(backend=be, lockstep=lockstep,
+                        **{k: v for k, v in (("hz", hz), ("budget", budget)) if v})
         judg = dict(DEFAULT)
     else:
         judg = {"maneuver": "hold_course", "risk": 0.0, "confidence": 0.0,
@@ -298,7 +302,10 @@ def episode(seed=0, seconds=35.0, use_jev=True, video=None, hz=None, budget=None
             frames += 1
             vis += scene["target"]["visible"]
             if tac and decision_needed(scene):
-                tac.offer(scene, t)
+                t_off = time.time()
+                tac.offer(scene, t, eye.last_rgb)
+                if lockstep and realtime:
+                    wall0 += time.time() - t_off   # the world waited for the model
 
         if i % 10 == 0 and scene:                        # 50 Hz guidance
             if tac:
@@ -368,7 +375,10 @@ def episode(seed=0, seconds=35.0, use_jev=True, video=None, hz=None, budget=None
            "distance_flown_m": round(float(np.linalg.norm(d.qpos[:3] - np.array([1.5, 0, CRUISE_ALT]))), 1),
            "steps_jev_acted_pct": round(100 * jev_steps / (n / 10), 1),
            "steps_reflex_pct": round(100 * reflex_steps / (n / 10), 1),
-           "max_x_m": round(max_x, 1), "crossed_barrier": crossed, "crashed_at_s": crashed_at, "flew_s": round(len(standoffs) * dt, 1)}
+           "max_x_m": round(max_x, 1), "crossed_barrier": crossed, "crashed_at_s": crashed_at, "flew_s": round(len(standoffs) * dt, 1),
+           # sim seconds per wall second; below 1 means the box could not keep up, which hands the
+           # decision model extra time (lockstep pauses are excluded, since wall0 absorbs them)
+           "realtime_factor": round(len(standoffs) * dt / max(time.time() - wall0, 1e-9), 2)}
     if tac:
         out["jev"] = tac.stats()
         tac.close()
@@ -384,8 +394,17 @@ if __name__ == "__main__":
     p.add_argument("--hz", type=float, default=None)
     p.add_argument("--budget", type=int, default=None)
     p.add_argument("--fast", action="store_true", help="run faster than real time (unfair to Jev)")
+    p.add_argument("--backend", choices=["jev", "laya"], default="jev", help="who answers the tactical questions")
+    p.add_argument("--laya-model", default=None, help="Hub id or local path (default: tactics.LAYA_MODEL)")
+    p.add_argument("--laya-image", action="store_true", help="also give Laya the onboard camera frame")
+    p.add_argument("--lockstep", action="store_true", help="pause the sim while the model decides (no latency)")
+    p.add_argument("--out", default=None, help="append one JSON line per episode to this file")
     a = p.parse_args()
     for s in a.seeds:
-        r = episode(s, a.seconds, not a.no_jev, a.video, a.hz, a.budget, realtime=not a.fast)
+        r = episode(s, a.seconds, not a.no_jev, a.video, a.hz, a.budget, realtime=not a.fast,
+                    backend=a.backend, laya_model=a.laya_model, laya_image=a.laya_image, lockstep=a.lockstep)
         print(json.dumps(r))
         sys.stdout.flush()
+        if a.out:
+            with open(a.out, "a") as f:
+                f.write(json.dumps(r) + "\n")
