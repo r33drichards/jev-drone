@@ -25,6 +25,10 @@ import numpy as np
 import probe
 from rover_data import STEER_CENTRES
 
+# range (m) at each probe.SPEED level: the middle of each level's band (<2.5, 2.5-4, 4-7, >7). No
+# fitting needed: 0.81 m mean error on the held-out no-climb frames, a forward-speed command
+# error of 0.52 m/s against 1.00 for a constant guess (results/laya-steer/README.md)
+SPEED_RANGE_M = [2.0, 3.25, 5.5, 9.0]
 FRESH_S = 0.5            # an estimate older than this (frame time -> now) no longer steers
 N_STRIPS = 5
 
@@ -38,7 +42,7 @@ def true_fix(m, d, scene):
     cam = d.qpos[:3] + flight.Eye.NOSE_OFFSET_M * np.array([np.cos(yaw), np.sin(yaw), 0.0])
     r = d.mocap_pos[m.body("rover").mocapid[0]] - cam
     fwd, left = np.cos(yaw) * r[0] + np.sin(yaw) * r[1], -np.sin(yaw) * r[0] + np.cos(yaw) * r[1]
-    return bool(scene["target"]["visible"]), float(np.rad2deg(np.arctan2(left, fwd)))
+    return bool(scene["target"]["visible"]), float(np.rad2deg(np.arctan2(left, fwd))), float(np.hypot(fwd, left))
 
 
 def _wrap(a):
@@ -58,10 +62,10 @@ class SimBackend:
         self.model = "sim(noise=%g,delay=%g)" % (noise_deg, delay_s)
 
     def locate(self, frame, truth):
-        vis, b = truth
+        vis, b, rng = truth
         if not vis:
-            return False, None, 0.0
-        return True, b + self.noise_deg * float(self.rng.normal()), 1.0
+            return False, None, 0.0, None
+        return True, b + self.noise_deg * float(self.rng.normal()), 1.0, rng
 
 
 class _Laya:
@@ -125,21 +129,29 @@ class FrameBackend(_Laya):
     scored on the unseen no-climb layout: 4.5 deg mean error there, against 6.3 read raw
     (results/probe/README.md)."""
 
-    def __init__(self, model=None, threshold=0.5, sharpen=2.0, gain=1.16, **kw):
+    def __init__(self, model=None, threshold=0.5, sharpen=2.0, gain=1.16, speed=False, **kw):
+        """`speed`: also ask probe.questions()["speed"] in the same predict and return a range (m),
+        so Laya sets forward speed too (pursuit="laya-pursuit")."""
         super().__init__(model, threshold, **kw)
-        self.sharpen, self.gain = sharpen, gain
-        self.model = "laya-frame:" + (model or "default")
+        self.sharpen, self.gain, self.speed = sharpen, gain, speed
+        self.model = ("laya-pursuit:" if speed else "laya-frame:") + (model or "default")
         qs = probe.questions()
         self.qs = {"visible": qs["visible"], "steer": qs["steer"]}
+        if speed:
+            self.qs["speed"] = qs["speed"]
         self.warm_up()
 
     def locate(self, frame, truth=None):
         a = self.agent.predict({"image": self._img(frame)}, self.qs)["answers"]
         pv = float(a["visible"]["noul"])
         if pv < self.threshold:
-            return False, None, pv
+            return False, None, pv, None
         p = np.array([float(a["steer"]["probabilities"][str(i)]) for i in range(len(STEER_CENTRES))]) ** self.sharpen
-        return True, self.gain * float((p / p.sum() * np.array(STEER_CENTRES)).sum()), pv
+        rng = None
+        if self.speed:
+            ps = [float(a["speed"]["probabilities"][str(i)]) for i in range(len(SPEED_RANGE_M))]
+            rng = float(np.dot(ps, SPEED_RANGE_M))
+        return True, self.gain * float((p / p.sum() * np.array(STEER_CENTRES)).sum()), pv, rng
 
 
 def make_locator_backend(mode, model=None, threshold=0.5, noise_deg=0.0, delay_s=0.0, seed=0):
@@ -149,6 +161,8 @@ def make_locator_backend(mode, model=None, threshold=0.5, noise_deg=0.0, delay_s
         return StripsBackend(model, threshold)
     if mode == "laya-frame":
         return FrameBackend(model, threshold)
+    if mode == "laya-pursuit":
+        return FrameBackend(model, threshold, speed=True)
     raise ValueError("pursuit locator must be sim, laya-strips or laya-frame, got %r" % mode)
 
 
@@ -180,7 +194,7 @@ class Locator:
         self.n_offer = self.n_busy = self.n_dropped = self.errors = 0
         self.last_error = None
         self.latency = []
-        self.err, self.ref_err, self.vis_ok = [], [], []
+        self.err, self.ref_err, self.vis_ok, self.range_err = [], [], [], []
         self.false_visible = self.missed_visible = 0
         self._stop = threading.Event()
         self._thread = threading.Thread(target=self._worker, daemon=True)
@@ -191,7 +205,7 @@ class Locator:
         this frame, scored against the same truth for comparison; never used to steer."""
         self.n_offer += 1
         truth = self.truth() if self.truth else None
-        if truth and truth[0] and ref_bearing is not None:
+        if truth and truth[0] and ref_bearing is not None:  # truth: (visible, bearing_deg, range_m)
             self.ref_err.append(abs(ref_bearing - truth[1]))
         if now < self._busy_until:
             self.n_busy += 1
@@ -224,7 +238,8 @@ class Locator:
                     self._last_seen = e["t"]
             e = self._latest
         if e is None:
-            return {"visible": False, "bearing_deg": None, "age_s": None, "fresh": False, "unseen_for_s": None}
+            return {"visible": False, "bearing_deg": None, "range_m": None, "age_s": None, "fresh": False,
+                    "unseen_for_s": None}
         age = now - e["t"]
         fresh = age < self.fresh_s
         b = e["bearing_deg"]
@@ -232,8 +247,8 @@ class Locator:
             b -= float(np.rad2deg(_wrap(yaw - e["yaw"])))
         vis = bool(fresh and e["visible"])
         unseen = 0.0 if vis else (None if self._last_seen is None else round(now - self._last_seen, 2))
-        return {"visible": vis, "bearing_deg": b if vis else None, "age_s": round(age, 3), "fresh": fresh,
-                "unseen_for_s": unseen, "p_visible": e["p_visible"]}
+        return {"visible": vis, "bearing_deg": b if vis else None, "range_m": e.get("range_m") if vis else None,
+                "age_s": round(age, 3), "fresh": fresh, "unseen_for_s": unseen, "p_visible": e["p_visible"]}
 
     def _worker(self):
         while not self._stop.is_set():
@@ -243,7 +258,9 @@ class Locator:
                 continue
             t0 = time.time()
             try:
-                vis, b, p = self.backend.locate(frame, truth)
+                res = self.backend.locate(frame, truth)
+                vis, b, p = res[:3]
+                rng = res[3] if len(res) > 3 else None     # backends without a range estimate return 3
                 self.latency.append(time.time() - t0)
                 if truth is not None:
                     self.vis_ok.append(vis == truth[0])
@@ -251,9 +268,12 @@ class Locator:
                     self.missed_visible += truth[0] and not vis
                     if vis and truth[0]:
                         self.err.append(abs(b - truth[1]))
+                        if rng is not None:
+                            self.range_err.append(abs(rng - truth[2]))
                 with self._lock:
                     self._pending.append((t + self.delay_s,
-                                          {"visible": vis, "bearing_deg": b, "p_visible": p, "t": t, "yaw": yaw}))
+                                          {"visible": vis, "bearing_deg": b, "range_m": rng, "p_visible": p,
+                                           "t": t, "yaw": yaw}))
             except Exception as ex:                  # degrade to "not seen", never crash the flight
                 self.errors += 1
                 self.last_error = f"{type(ex).__name__}: {ex}"[:160]
@@ -276,4 +296,5 @@ class Locator:
                 "code_bearing_mae_deg": r(np.mean(self.ref_err), 2) if self.ref_err else None,
                 "visible_acc": r(np.mean(self.vis_ok)) if self.vis_ok else None,
                 "false_visible": int(self.false_visible), "missed_visible": int(self.missed_visible),
-                "warmup_s": getattr(self.backend, "warmup_s", None)}
+                "warmup_s": getattr(self.backend, "warmup_s", None),
+                "range_mae_m": r(np.mean(self.range_err), 2) if self.range_err else None}

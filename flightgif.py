@@ -36,17 +36,20 @@ def _laya_line(loc, truly, tb, disagree):
     """'Laya: rover at +12 deg (true +10)' / 'Laya: not visible (truly visible)', red when the
     visibility disagrees with the segmentation truth."""
     if loc["visible"]:
-        txt = "Laya: rover at %+.0f\u00b0" % loc["bearing_deg"]
+        txt = "Laya steer: rover at %+.0f\u00b0" % loc["bearing_deg"]
         txt += " (true %+.0f\u00b0)" % tb if truly else " (truly NOT visible)"
     else:
-        txt = "Laya: not visible" + (" (truly visible %+.0f\u00b0)" % tb if truly else " (truly not)")
+        txt = "Laya steer: not visible" + (" (truly visible %+.0f\u00b0)" % tb if truly else " (truly not)")
     col = (255, 80, 80) if disagree else ((255, 220, 60) if loc["visible"] else (170, 170, 170))
     return txt, col
 
 
-def make_gif(record, course, seed, title, directory=".", every=2, frame_ms=100, trim_after_s=8.0):
+def make_gif(record, course, seed, title, directory=".", every=2, frame_ms=100, trim_after_s=8.0,
+             tactics_label="tactics"):
     """`every`: keep one snapshot in `every` (snapshots are 0.2 s apart, so every=2 at 100 ms
-    per frame plays at 4x). Stops `trim_after_s` after the aircraft last made progress."""
+    per frame plays at 4x). Stops `trim_after_s` after the aircraft last made progress.
+    `tactics_label` names who gave the tactical answer (e.g. "tactics (oracle)"): with the oracle
+    as the tactical backend, a bare "answer: hold_course" read as if Laya had said it."""
     import mujoco
     import courses
     c = courses.make(course, seed)
@@ -117,7 +120,7 @@ def make_gif(record, course, seed, title, directory=".", every=2, frame_ms=100, 
         y0 = PANEL_W * 3 // 4 + 8
         lines = [
             ("t = %5.1f s   x = %5.1f m" % (snap["t"], snap["qpos"][0]), (230, 230, 230)),
-            ("answer: %s" % (j.get("maneuver") if live else "-"), (255, 210, 80) if live else (150, 150, 150)),
+            ("%s: %s" % (tactics_label, j.get("maneuver") if live else "-"), (255, 210, 80) if live else (150, 150, 150)),
             ("  confidence %.2f" % (j.get("confidence") or 0), (200, 200, 200)),
             ("  risk %.2f   lost %.2f" % (j.get("risk") or 0, j.get("target_truly_lost") or 0), (200, 200, 200)),
             ("CLIMBING" if snap["climbing"] else "", (120, 220, 255)),
@@ -141,6 +144,10 @@ def make_gif(record, course, seed, title, directory=".", every=2, frame_ms=100, 
             else:
                 lines.append(("  age %.2fs  p(vis) %.2f" % (loc.get("age_s") or 0, loc.get("p_visible") or 0)
                               if loc.get("age_s") is not None else "", (170, 170, 170)))
+            if loc.get("range_m") is not None:          # pursuit="laya-pursuit": Laya sets forward speed
+                cr = snap.get("code_range_m")
+                lines.append(("Laya speed: rover %.1f m%s" % (loc["range_m"], " (code %.1f)" % cr if cr else ""),
+                              (255, 220, 60)))
         for n, (txt, col) in enumerate(lines):
             if txt:
                 dr.text((CHASE_W + 8, y0 + 18 * n), txt, fill=col, font=font)
