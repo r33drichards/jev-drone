@@ -64,6 +64,16 @@ CONFIGS = {
     "sim-steer": (True, "const:oracle", False, False, {"pursuit": "sim"}),
     "sim-steer-noisy": (True, "const:oracle", False, False,
                         {"pursuit": "sim", "pursuit_noise_deg": 6.0, "pursuit_delay_s": 0.2}),
+    # the lost-target search carries the last fix forward up to search_lead_s (default 5 s); the
+    # pockets hide the rover ~10 s, so let it extrapolate 12 s, or without a practical bound (60 s).
+    # -hold: search_on_hold, so the oracle's hold_course no longer pre-empts that search (without it
+    # the search only runs once the judgment goes stale). e.g. code-pursuit-hold, laya-steer-frame-hold-lead12
+    **{"%s%s%s" % (name, "-hold" if hold else "", "-lead%d" % lead if lead != 5 else ""):
+       (True, "const:oracle", False, False,
+        dict(pk, search_lead_s=float(lead), **({"search_on_hold": True} if hold else {})))
+       for name, pk in (("code-pursuit", {"pursuit": "code"}), ("laya-steer-frame", {"pursuit": "laya-frame"}),
+                        ("sim-steer-noisy", {"pursuit": "sim", "pursuit_noise_deg": 6.0, "pursuit_delay_s": 0.2}))
+       for hold, leads in ((False, (12, 60)), (True, (5, 12, 60))) for lead in leads},
 }
 
 
@@ -141,9 +151,11 @@ def render_course(course: str, seed: int):
 @app.function(gpu=["L4", "A10G"], cpu=4, memory=16384, timeout=60 * 60,
               volumes={"/cache/hf": hf_vol, "/ckpt": ckpt_vol.read_only()})
 def fly_gif(config: str, seed: int, seconds: float, course: str, budget: int = 0, model: str = ""):
-    """fly(), recording the flight, then render it as a GIF (flightgif.py) after the flight ends."""
+    """fly(), recording the flight, then render it as a GIF (flightgif.py) after the flight ends.
+    Returns (episode result, GIF bytes, the snapshots without images as JSON text)."""
     _enter()
     import run, flightgif
+    import numpy as np
     use_model, backend, img, lockstep, pk = _config(config)
     rec = []
     r = run.episode(seed, seconds, use_jev=use_model, backend=backend, laya_model=model or None,
@@ -152,7 +164,21 @@ def fly_gif(config: str, seed: int, seconds: float, course: str, budget: int = 0
     r.update(config=config)
     outcome = "finished" if r["finished_at_s"] is not None else "stopped at x=%.0f m" % r["max_x_m"]
     title = "%s  |  %s seed %d  |  %s" % (config, course, seed, outcome)
-    return r, flightgif.make_gif(rec, course, seed, title, "/root/jev")
+    # the snapshots minus the heavy parts (images, full state), as JSON text for loss analysis
+    rid = None
+    track = []
+    for s in rec:
+        if rid is None:
+            import mujoco, courses
+            cm = courses.make(course, seed)
+            rid = mujoco.MjModel.from_xml_path(cm.write("/root/jev")).body("rover").mocapid[0]
+        track.append({"t": round(s["t"], 2), "pos": [round(float(v), 2) for v in s["qpos"][:3]],
+                      "yaw_deg": round(float(np.rad2deg(s["yaw"])), 1),
+                      "rover": [round(float(v), 2) for v in s["mocap_pos"][rid][:2]],
+                      **{k: s.get(k) for k in ("target_visible", "loc", "true_bearing_deg", "code_bearing_deg",
+                                               "code_range_m", "guide", "reflex", "climbing", "hits")},
+                      "maneuver": s["judg"].get("maneuver")})
+    return r, flightgif.make_gif(rec, course, seed, title, "/root/jev"), json.dumps(track, default=float)
 
 
 @app.function(gpu=["L4", "A10G"], cpu=4, memory=16384, timeout=60 * 60,
@@ -251,7 +277,9 @@ def courses_png(names: str = "pockets,mixed,no-climb", seed: int = 0):
 @app.local_entrypoint()
 def gifs(config: str = "laya-image", courses: str = "pockets,mixed", seeds: str = "0,1,2,3,4,5",
          seconds: float = 90.0, budget: int = 240, model: str = ""):
-    """Fly and record every (course, seed); write docs/gifs/<config>-<course>-<seed>-<outcome>.gif."""
+    """Fly and record every (course, seed); write docs/gifs/<config>-<course>-seed<k>-<outcome>.gif
+    (outcome: finished, lowvis = finished with the rover in view < 30%, stuck), and each flight's
+    snapshots without images to results/laya/<timestamp>/track-*.json."""
     d = os.path.join(HERE, "docs", "gifs")
     os.makedirs(d, exist_ok=True)
     jobs = [(k, int(s)) for k in courses.split(",") for s in seeds.split(",")]
@@ -262,14 +290,17 @@ def gifs(config: str = "laya-image", courses: str = "pockets,mixed", seeds: str 
         if isinstance(res, Exception):
             print("FAILED", k, s, repr(res)[:300])
             continue
-        r, gif = res
-        tag = "finished" if r["finished_at_s"] is not None else "stuck"
+        r, gif, track = res
+        tag = ("stuck" if r["finished_at_s"] is None
+               else "lowvis" if r["target_visible_pct"] < 30 else "finished")
         path = os.path.join(d, "%s-%s-seed%d-%s.gif" % (config, k, s, tag))
         open(path, "wb").write(gif)
+        open(os.path.join(out, "track-%s-%s-seed%d.json" % (config, k, s)), "w").write(track)
         with open(os.path.join(out, "episodes.jsonl"), "a") as f:
             f.write(json.dumps(r) + "\n")
-        print("%-8s seed=%d %-8s max_x=%5.1f vis=%4.1f%% rt=%.2f gif=%dKB"
-              % (k, s, tag, r["max_x_m"], r["target_visible_pct"], r["realtime_factor"], len(gif) // 1024), flush=True)
+        print("%-8s seed=%d %-8s fin=%s max_x=%5.1f vis=%4.1f%% rt=%.2f mae=%s lat=%s gif=%dKB"
+              % (k, s, tag, r["finished_at_s"], r["max_x_m"], r["target_visible_pct"], r["realtime_factor"],
+                 r.get("pursuit_bearing_mae_deg"), r.get("pursuit_median_latency_s"), len(gif) // 1024), flush=True)
 
 
 @app.local_entrypoint()

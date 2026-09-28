@@ -65,8 +65,13 @@ class Guidance:
     open space and flying into it, not by sliding blindly.
     """
 
-    def __init__(self, eye):
+    def __init__(self, eye, search_lead_s=5.0, search_on_hold=False):
         self.eye = eye
+        # how far (s) the lost-target search may carry the last fix forward along its velocity
+        self.search_lead_s = float(search_lead_s)
+        # a fresh hold_course judgment normally pre-empts the baseline search, so with the
+        # const:oracle tactics a lost rover is never searched for; True lets it fall through
+        self.search_on_hold = bool(search_on_hold)
         self.last_bearing = 0.0
         self.yaw_sp = None
         self.sweep = 0.0
@@ -81,13 +86,20 @@ class Guidance:
         self.tgt_v = np.zeros(2)
         self.tgt_t = 0.0
         self.tgt_hist = []
+        # diagnostics only (never steer): world-fix updates, and the fix's age at each search heading
+        self.n_fix = 0
+        self.n_search_nofix = 0
+        self.search_ages = []
+        self.n_search_steps = 0         # guidance steps flown on a search heading (either branch)
 
     def _search_heading(self, yaw, t, pos):
         """Where the target probably is now: last fix, carried forward by the
         velocity we observed while we could still see it."""
         if self.tgt_w is None or pos is None:
+            self.n_search_nofix += 1
             return self.search_yaw if self.search_yaw is not None else yaw
-        lead = float(np.clip(t - self.tgt_t, 0.0, 5.0))   # do not extrapolate forever
+        self.search_ages.append(t - self.tgt_t)
+        lead = float(np.clip(t - self.tgt_t, 0.0, self.search_lead_s))   # do not extrapolate forever
         aim = self.tgt_w + self.tgt_v * lead
         d = aim - pos[:2]
         if np.linalg.norm(d) < 0.5:
@@ -120,6 +132,7 @@ class Guidance:
                 off = np.array([rng * np.cos(b), rng * np.sin(b)])
                 w = pos[:2] + np.array([c * off[0] - s * off[1], s * off[0] + c * off[1]])
                 self.tgt_w, self.tgt_t = w, t
+                self.n_fix += 1
                 # Differentiate over a ~1s baseline, not over one camera frame:
                 # a 0.07s interval turns pixel noise into tens of m/s.
                 self.tgt_hist.append((t, w))
@@ -163,8 +176,10 @@ class Guidance:
 
         # --- Jev's tactical commitment (advisory) --------------------------------
         acted = False
-        if (use_jev and judg["source"] in ("jev", "laya") and judg["age_s"] < THRESH["stale_after_s"]
-                and (decision_needed(scene) or self.climb_hold)):
+        hold_search = False
+        tactical = (use_jev and judg["source"] in ("jev", "laya") and judg["age_s"] < THRESH["stale_after_s"]
+                    and (decision_needed(scene) or self.climb_hold))
+        if tactical:
             self.commit_left = max(0, self.commit_left - 1)
             if self.commit_left == 0 or judg["risk"] >= THRESH["override_risk"]:
                 if judg["maneuver"] != self.commit:
@@ -199,17 +214,20 @@ class Guidance:
                 absolute_yaw = self.yaw_sp
                 # must out-run the rover, or a lost target can never be regained
                 fwd, slide, turn_bias = SEARCH_SPEED, 0.0, 0.0
+                self.n_search_steps += 1
             else:
                 acted = False                      # hold_course changes nothing
+                hold_search = self.search_on_hold and mv == "hold_course" and self.lost_for > 1.2
             if judg["risk"] > THRESH["risk_slow_down"]:
                 fwd *= 0.45
-        elif self.lost_for > 1.2:
+        if hold_search or (not tactical and self.lost_for > 1.2):
             # baseline search: never keep flying a bearing we can no longer see
             if fresh:
                 self.sweep += 0.3
                 self.yaw_sp = self._search_heading(yaw, t, pos) + 0.35 * np.sin(self.sweep)
             absolute_yaw = self.yaw_sp
             fwd, slide = SEARCH_SPEED, 0.0
+            self.n_search_steps += 1
 
         # --- hard reflex: code overrides everything, Jev included ------------------
         # Reflex on what is in the path, not on what is merely alongside.
@@ -240,7 +258,7 @@ class Guidance:
 def episode(seed=0, seconds=35.0, use_jev=True, video=None, hz=None, budget=None, realtime=True,
             backend="jev", laya_model=None, laya_image=False, lockstep=False, course="classic", record=None,
             pursuit="code", pursuit_model=None, pursuit_threshold=0.5, pursuit_noise_deg=0.0,
-            pursuit_delay_s=0.0, pursuit_lockstep=False):
+            pursuit_delay_s=0.0, pursuit_lockstep=False, search_lead_s=5.0, search_on_hold=False):
     """`record`: a list to append a snapshot to every 0.2 s of sim time (pose, obstacles,
     judgment, and the camera frame the model saw), for rendering after the flight
     (flightgif.py). Cheap, so the flight stays real time.
@@ -248,7 +266,12 @@ def episode(seed=0, seconds=35.0, use_jev=True, video=None, hz=None, budget=None
     `pursuit`: where the pursuit HEADING comes from. "code" (the segmentation bearing),
     "laya-strips" / "laya-frame" (Laya on the RGB frame, laya_pursuit.py), or "sim" (the true
     bearing + `pursuit_noise_deg` noise, `pursuit_delay_s` late: a model-free stand-in). Range, and
-    so forward speed, stays the code's in every mode; Laya's speed answer is not trained well yet."""
+    so forward speed, stays the code's in every mode; Laya's speed answer is not trained well yet.
+
+    `search_lead_s`: the longest the lost-target search carries the last world fix forward along
+    the rover's observed velocity (Guidance._search_heading). `search_on_hold`: search for a
+    rover lost > 1.2 s even while the tactical answer is hold_course (by default a fresh
+    hold_course pre-empts the search, so with const:oracle tactics it never runs)."""
     rng = np.random.default_rng(seed)
     if course == "classic":
         m = mujoco.MjModel.from_xml_path("world.xml")
@@ -269,7 +292,7 @@ def episode(seed=0, seconds=35.0, use_jev=True, video=None, hz=None, budget=None
 
     pilot = flight.Pilot(m)
     eye = flight.Eye(m, rgb_size=(512, 384) if ((use_jev and laya_image) or pursuit.startswith("laya")) else None)
-    guide = Guidance(eye)
+    guide = Guidance(eye, search_lead_s, search_on_hold)
     loc = None
     if pursuit != "code":
         import laya_pursuit
@@ -310,6 +333,10 @@ def episode(seed=0, seconds=35.0, use_jev=True, video=None, hz=None, budget=None
     crashed_at, max_x, crossed, finished_at = None, -99.0, False, None
     jev_steps = reflex_steps = 0
     fix, fix_steps, guide_steps = None, 0, 0
+    # reacquisition, on the visibility the pursuit steers on (the locator's, else the code's),
+    # sampled every guidance step; stretches before the first sighting are not losses
+    seen_once, unseen_since, gaps = False, None, []
+    lost_steps = lost_search = lost_reflex = n_search_prev = 0
     n = int(seconds / dt)
 
     wall0 = time.time()
@@ -376,6 +403,18 @@ def episode(seed=0, seconds=35.0, use_jev=True, video=None, hz=None, budget=None
             fresh = False
             jev_steps += acted
             reflex_steps += reflex
+            pvis = bool((fix if loc else scene["target"])["visible"])
+            if pvis:
+                if unseen_since is not None:
+                    gaps.append((t - unseen_since, True))
+                seen_once, unseen_since = True, None
+            elif seen_once and unseen_since is None:
+                unseen_since = t
+            if not pvis and guide.lost_for > 1.2:        # lost long enough that a search is due
+                lost_steps += 1
+                lost_search += guide.n_search_steps > n_search_prev
+                lost_reflex += reflex
+            n_search_prev = guide.n_search_steps
 
         d.ctrl[:] = pilot(d, v_des, yaw_cmd, dt)
         mujoco.mj_step(m, d)
@@ -409,7 +448,30 @@ def episode(seed=0, seconds=35.0, use_jev=True, video=None, hz=None, budget=None
                                                              "target_truly_lost", "source", "age_s")},
                            "reflex": bool(scene["path_ahead_m"] < REFLEX_M), "climbing": bool(guide.climb_hold),
                            "target_visible": bool(scene["target"]["visible"]), "hits": hits,
-                           "rgb": None if rgb is None else rgb[::2, ::2].copy()})
+                           "rgb": None if rgb is None else rgb[::2, ::2].copy(),
+                           # the pursuit input as Guidance used it this step (`fix` from loc.read; None when
+                           # pursuit is the code's), next to the truth and the code's segmentation bearing
+                           "loc": None if fix is None else {
+                               "visible": bool(fix["visible"]), "bearing_deg": fix["bearing_deg"],
+                               "unseen_for_s": fix["unseen_for_s"], "age_s": est.get("age_s"),
+                               "p_visible": est.get("p_visible")},
+                           "true_bearing_deg": (lambda r: float(np.rad2deg(np.arctan2(
+                               -np.sin(yaw) * r[0] + np.cos(yaw) * r[1], np.cos(yaw) * r[0] + np.sin(yaw) * r[1]))))(
+                               d.mocap_pos[m.body("rover").mocapid[0]] - pos
+                               - flight.Eye.NOSE_OFFSET_M * np.array([np.cos(yaw), np.sin(yaw), 0.0])),
+                           "code_bearing_deg": scene["target"]["bearing_deg"],
+                           "code_range_m": scene["target"]["range_m"],
+                           "guide": {"lost_for": float(getattr(guide, "lost_for", 0.0) or 0.0),
+                                     "yaw_sp": None if guide.yaw_sp is None else float(guide.yaw_sp),
+                                     # which lost-target branch Guidance could take this step, mirroring its
+                                     # conditions: "tactical" (a live judgment owns it; only "reacquire" there
+                                     # searches), "baseline" (the lost_for > 1.2 search), or None
+                                     "branch": ("tactical" if (use_jev and judg.get("source") in ("jev", "laya")
+                                                               and (judg.get("age_s") or 0) < THRESH["stale_after_s"]
+                                                               and (decision_needed(scene) or guide.climb_hold))
+                                                else "baseline" if guide.lost_for > 1.2 else None),
+                                     "tgt_w": None if getattr(guide, "tgt_w", None) is None
+                                     else [float(v) for v in guide.tgt_w]}})
 
         if writer and i % 17 == 0 and scene:              # 30 fps video
             cam.lookat[:] = pos
@@ -450,6 +512,25 @@ def episode(seed=0, seconds=35.0, use_jev=True, video=None, hz=None, budget=None
         out["jev"] = tac.stats()
         tac.close()
     out["pursuit"] = pursuit
+    # loss = the pursuit source's view of the rover gone for > 2 s after a first sighting; one still
+    # open when the flight ends counts as a loss (and toward the longest), not toward reacquire time
+    if unseen_since is not None:
+        gaps.append((len(standoffs) * dt - unseen_since, False))
+    losses = [g for g in gaps if g[0] > 2.0]
+    back = [g for g, ok in losses if ok]
+    ages = guide.search_ages
+    out.update(search_lead_s=search_lead_s, search_on_hold=search_on_hold, loss_events=len(losses),
+               longest_unseen_s=round(max([g for g, _ in gaps], default=0.0), 1),
+               mean_reacquire_s=round(float(np.mean(back)), 1) if back else None,
+               lost_at_end=bool(losses and not losses[-1][1]),
+               world_fix_updates=guide.n_fix, search_steps_no_fix=guide.n_search_nofix,
+               search_fix_age_p50_s=round(float(np.median(ages)), 1) if ages else None,
+               search_fix_age_over_5s_pct=round(100 * float(np.mean(np.array(ages) > 5.0)), 1) if ages else None,
+               # of the steps lost > 1.2 s: how many flew a search heading (where the lead can matter;
+               # a fresh hold_course judgment pre-empts the search) and how many the reflex held
+               lost_s=round(lost_steps * 10 * dt, 1),
+               lost_searching_pct=round(100 * lost_search / lost_steps, 1) if lost_steps else None,
+               lost_reflex_pct=round(100 * lost_reflex / lost_steps, 1) if lost_steps else None)
     if loc:
         st = loc.stats()
         loc.close()
@@ -482,12 +563,17 @@ if __name__ == "__main__":
     p.add_argument("--pursuit-noise", type=float, default=0.0, help="sim pursuit: bearing noise std (deg)")
     p.add_argument("--pursuit-delay", type=float, default=0.0, help="sim pursuit: answer latency (sim s)")
     p.add_argument("--pursuit-lockstep", action="store_true", help="pause the sim while the locator looks")
+    p.add_argument("--search-lead", type=float, default=5.0,
+                   help="longest (s) the lost-target search extrapolates the last fix along its velocity")
+    p.add_argument("--search-on-hold", action="store_true",
+                   help="search for a lost rover even while the tactical answer is hold_course")
     a = p.parse_args()
     for s in a.seeds:
         r = episode(s, a.seconds, not a.no_jev, a.video, a.hz, a.budget, realtime=not a.fast,
                     backend=a.backend, laya_model=a.laya_model, laya_image=a.laya_image, lockstep=a.lockstep, course=a.course,
                     pursuit=a.pursuit, pursuit_model=a.pursuit_model, pursuit_threshold=a.pursuit_threshold,
-                    pursuit_noise_deg=a.pursuit_noise, pursuit_delay_s=a.pursuit_delay, pursuit_lockstep=a.pursuit_lockstep)
+                    pursuit_noise_deg=a.pursuit_noise, pursuit_delay_s=a.pursuit_delay, pursuit_lockstep=a.pursuit_lockstep,
+                    search_lead_s=a.search_lead, search_on_hold=a.search_on_hold)
         print(json.dumps(r))
         sys.stdout.flush()
         if a.out:
