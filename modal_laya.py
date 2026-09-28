@@ -195,7 +195,7 @@ def probe(frames: str = "/tmp/probe", model: str = "", n_permutations: int = 1, 
     rows = [json.loads(l) for l in open(os.path.join(frames, "labels.jsonl"))]
     blobs = {r["frame"]: open(os.path.join(frames, "frames", r["frame"]), "rb").read() for r in rows}
     preds, summary = (json.loads(x) for x in probe_remote.remote(blobs, rows, model, n_permutations, mode, n_strips))
-    d = os.path.join(HERE, "results", "probe")
+    d = os.path.join(HERE, "results", "probe", os.path.basename(os.path.normpath(frames)))
     os.makedirs(d, exist_ok=True)
     tag = "strips%d" % n_strips if mode == "strips" else "perm%d" % n_permutations
     with open(os.path.join(d, "preds-%s.jsonl" % tag), "w") as f:
