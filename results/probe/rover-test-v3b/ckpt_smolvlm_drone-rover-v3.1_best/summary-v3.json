@@ -1,0 +1,129 @@
+{
+ "frames": 3891,
+ "lost_frames": 2923,
+ "occluded_auc_lost": 0.9516056147761273,
+ "occluded_auc_all": 0.9577264154728943,
+ "occluded_true_lost": 1278,
+ "occluded_acc_lost": 0.8799178925761204,
+ "occluded_majority_lost": 0.562777967841259,
+ "reappear_lost": {
+  "n": 2923,
+  "acc": 0.7023605884365378,
+  "majority_baseline": 0.36195689360246325,
+  "truth_counts": {
+   "left": 606,
+   "ahead": 657,
+   "right": 602,
+   "behind": 1058
+  },
+  "confusion": {
+   "left": {
+    "left": 416,
+    "ahead": 38,
+    "right": 44,
+    "behind": 108
+   },
+   "ahead": {
+    "left": 81,
+    "ahead": 484,
+    "right": 67,
+    "behind": 25
+   },
+   "right": {
+    "left": 83,
+    "ahead": 40,
+    "right": 381,
+    "behind": 98
+   },
+   "behind": {
+    "left": 166,
+    "ahead": 18,
+    "right": 102,
+    "behind": 772
+   }
+  }
+ },
+ "reappear_visible": {
+  "n": 968,
+  "acc": 0.8026859504132231,
+  "majority_baseline": 0.3481404958677686,
+  "truth_counts": {
+   "left": 309,
+   "ahead": 337,
+   "right": 305,
+   "behind": 17
+  },
+  "confusion": {
+   "left": {
+    "left": 251,
+    "ahead": 49,
+    "right": 8,
+    "behind": 1
+   },
+   "ahead": {
+    "left": 40,
+    "ahead": 270,
+    "right": 27,
+    "behind": 0
+   },
+   "right": {
+    "left": 12,
+    "ahead": 38,
+    "right": 255,
+    "behind": 0
+   },
+   "behind": {
+    "left": 6,
+    "ahead": 2,
+    "right": 8,
+    "behind": 1
+   }
+  }
+ },
+ "reappear_eta": {
+  "n": 2923,
+  "acc": 0.8210742387957578,
+  "majority_baseline": 0.5165925419089976,
+  "within_one": 0.8874444064317482,
+  "spearman_expected_vs_true_s": 0.674263251752331,
+  "mae_s_capped15": 2.4905191564537086,
+  "truth_counts": [
+   1510,
+   266,
+   449,
+   698
+  ],
+  "pred_counts": [
+   1573,
+   275,
+   397,
+   678
+  ]
+ },
+ "maneuver": {
+  "n": 1839,
+  "acc": 0.9662860250135944,
+  "majority_baseline": 0.9646547036432844,
+  "climb_recall": 0.046153846153846156,
+  "climb_precision": 1.0,
+  "climb_auc": 0.9125140924464487,
+  "confusion": {
+   "hold_course": {
+    "hold_course": 1774,
+    "gap_left": 0,
+    "gap_right": 0,
+    "climb": 0,
+    "brake": 0,
+    "reacquire": 0
+   },
+   "climb": {
+    "hold_course": 61,
+    "gap_left": 0,
+    "gap_right": 0,
+    "climb": 3,
+    "brake": 1,
+    "reacquire": 0
+   }
+  }
+ }
+}
