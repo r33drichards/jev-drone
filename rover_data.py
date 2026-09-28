@@ -313,17 +313,19 @@ def v3_frame_labels(f):
 def records_v3(frames, image_dir, rel_prefix="images", visible_every=4):
     """Write the frames' images under image_dir and return their v3 records (probe.questions_v3). Every
     record carries its truth fields (v3_frame_labels) too; `maneuver` records are balanced later
-    (balance_maneuver), across a whole split."""
+    (balance_maneuver), across a whole split. A frame with a "stem" key (v3b) is written under that name, and
+    one whose maneuver is None (a v3b rotated view) gets no maneuver record."""
     from tactics import MANEUVERS
     os.makedirs(image_dir, exist_ok=True)
     qs = probe.questions_v3()
     man, rea = list(MANEUVERS), list(probe.REAPPEAR)
     recs, n_vis = [], 0
     for f in frames:
-        stem = "v3-%s-%d-%06.2f" % (f["course"], f["seed"], f["t"])
+        stem = f.get("stem") or "v3-%s-%d-%06.2f" % (f["course"], f["seed"], f["t"])
         open(os.path.join(image_dir, stem + ".jpg"), "wb").write(f["jpeg"])
         base = dict(image="%s/%s.jpg" % (rel_prefix, stem), **v3_frame_labels(f))
-        recs.append(dict(base, id=stem + "-maneuver", question=qs["maneuver"], label=man.index(f["maneuver"])))
+        if f["maneuver"] is not None:
+            recs.append(dict(base, id=stem + "-maneuver", question=qs["maneuver"], label=man.index(f["maneuver"])))
         extra = not f["visible"]
         if f["visible"]:
             extra = n_vis % visible_every == 0
@@ -422,6 +424,7 @@ def score_v3(preds):
                                "mae_s_capped15": float(np.mean(np.abs(np.minimum(te, 15) - ev))),
                                "truth_counts": [int((lv == k).sum()) for k in range(len(probe.REAPPEAR_ETA))],
                                "pred_counts": [int((pl == k).sum()) for k in range(len(probe.REAPPEAR_ETA))]}
+    preds = [p for p in preds if p.get("maneuver") is not None]   # v3b rotated views have no maneuver truth
     if preds:
         keys = list(preds[0]["maneuver_probs"])
         tr = [p["maneuver"] for p in preds]
@@ -435,3 +438,257 @@ def score_v3(preds):
                                                    [p["maneuver_probs"]["climb"] for p in preds if p["maneuver"] != "climb"]),
                            "confusion": conf(preds, "maneuver", "maneuver_probs", keys)}
     return out
+
+
+# --- drone_rover_v3b: more "rover lost / behind" examples, same records and labels as v3 ---------------------
+# Two sources, both labelled exactly as collect_flight_v3 labels a frame (occluded, reappear, reappear_eta from
+# the rendered view's own camera position and heading; context from the eye's segmentation sightings):
+#   rotated views   oracle flights (V3_COURSES), a snapshot every 0.5 s rendered at `n_views` headings yaw + d,
+#                   the aircraft as if turned in place to that heading (camera at pos + nose offset along it). d
+#                   is drawn so the rover's position REAPPEAR_HORIZON_S ahead lands in a class drawn from
+#                   V3B_VIEW_CLASS_P (behind / left / right well represented). Context: rendered view shows the
+#                   rover -> unseen 0, last seen = that view's segmentation bearing / range; else a lag u ~
+#                   U(V3B_LAG_S) is drawn and the latest real (natural-view) sighting at or before t - u is
+#                   re-expressed at the rotated heading (bearing_then + yaw_then - yaw_view, as collect_flight_v3
+#                   and laya_pursuit.LastSeen re-express it at the live yaw), unseen_for_s = t - t_sighting.
+#                   No maneuver (the tactical answer belongs to the real heading).
+#   failure flights run.episode's model-free pursuit stand-ins (V3B_FAILURE) with oracle tactics, which lose the
+#                   rover the way Laya does; natural heading, every 0.25 s from 1 s before the eye loses the rover
+#                   until the eye sees it again or 10 s pass (losses shorter than 0.25 s skipped), all four v3
+#                   questions (maneuver = the course oracle at that position).
+V3B_VIEW_CLASS_P = {"behind": 0.35, "left": 0.25, "right": 0.25, "ahead": 0.15}
+V3B_LAG_S = (0.07, 4.0)
+V3B_MAX_UNSEEN_S = 15.0          # rotated views skip snapshots where the natural view lost the rover longer ago
+V3B_FAILURE = {
+    "sim6": dict(pursuit="sim", pursuit_noise_deg=6.0, pursuit_delay_s=0.2),
+    "sim10": dict(pursuit="sim", pursuit_noise_deg=10.0, pursuit_delay_s=0.4),
+    "simr": dict(pursuit="sim-pursuit", pursuit_noise_deg=6.0, pursuit_delay_s=0.2,
+                 pursuit_range={"range_noise_m": 1.5, "range_tau_s": 1.0}),
+}
+
+
+def _view_bearing(rng):
+    """A bearing (deg, + left) for the rover's future position in the rotated view, class ~ V3B_VIEW_CLASS_P."""
+    ks = list(V3B_VIEW_CLASS_P)
+    c = ks[int(rng.choice(len(ks), p=[V3B_VIEW_CLASS_P[k] for k in ks]))]
+    if c == "ahead":
+        return float(rng.uniform(-20.0, 20.0))
+    if c == "left":
+        return float(rng.uniform(20.0, 90.0))
+    if c == "right":
+        return float(rng.uniform(-90.0, -20.0))
+    return float(rng.uniform(90.0, 180.0) * rng.choice([-1.0, 1.0]))
+
+
+class _V3Labeller:
+    """Renders and labels a view of a recorded sim state (qpos, mocap_pos, mocap_quat) at any heading, as
+    collect_flight_v3 does live: RGB JPEG, the eye's segmentation target test (>= 3 pixels), the v3 labels."""
+
+    def __init__(self, m, rover_at, oracle, eta_max_s=15.0, eta_step_s=0.25):
+        import mujoco, flight
+        self.mj, self.m, self.rover_at, self.oracle = mujoco, m, rover_at, oracle
+        self.eye = flight.Eye(m)
+        self.rgb = mujoco.Renderer(m, 384, 512)
+        self.d3, self.d2 = mujoco.MjData(m), mujoco.MjData(m)
+        self.x2 = m.body("x2").id
+        self.rmid = m.body("rover").mocapid[0]
+        self.etas = np.arange(0.0, eta_max_s + 1e-9, eta_step_s)
+        self.half_fov = float(np.rad2deg(np.arctan(probe.TAN_H)))
+
+    def set_state(self, st):
+        mj = self.mj
+        for d in (self.d3, self.d2):
+            d.qpos[:], d.mocap_pos[:], d.mocap_quat[:] = st["qpos"], st["mocap_pos"], st["mocap_quat"]
+        mj.mj_forward(self.m, self.d3)                      # lights and cameras too, for the render
+        self.d2.mocap_pos[self.rmid] = [0.0, 0.0, -50.0]    # the rays' copy: rover body parked out of the way
+        mj.mj_kinematics(self.m, self.d2)
+
+    def _clear(self, a, b):
+        x = self.mj.mj_ray(self.m, self.d2, a, b - a, None, 1, self.x2, np.array([-1], dtype=np.int32))
+        return x < 0 or x >= 1.0 - 1e-6
+
+    def view(self, pos, yaw, t):
+        """-> dict: jpeg, seg_visible, seg_pixels, seg_bearing_deg, seg_range_m, and the v3 truth fields."""
+        from PIL import Image
+        eye = self.eye
+        eye._aim(pos, yaw)
+        eye.seg.update_scene(self.d3, eye.cam)
+        seg = eye.seg.render()[:, :, 0]
+        mask = np.isin(seg, eye.target_ids)
+        px = int(mask.sum())
+        sb = sr = None
+        if px >= 3:
+            eye.depth.update_scene(self.d3, eye.cam)
+            z = np.clip(eye.depth.render(), 0.0, eye.MAX_RANGE)
+            sb = float(eye._bearing(float(np.nonzero(mask)[1].mean())))
+            sr = round(float(np.median(z[mask])), 2)
+        self.rgb.update_scene(self.d3, eye.cam)
+        buf = io.BytesIO()
+        Image.fromarray(self.rgb.render()).save(buf, "JPEG", quality=90)
+        cam = np.asarray(pos, dtype=float) + eye.NOSE_OFFSET_M * np.array([np.cos(yaw), np.sin(yaw), 0.0])
+        b_now, r_now = _rel(cam, yaw, self.d3.mocap_pos[self.rmid].copy())
+        b3, r3 = _rel(cam, yaw, self.rover_at(t + probe.REAPPEAR_HORIZON_S))
+        eta = None
+        for s in self.etas:
+            p = np.asarray(self.rover_at(t + s), dtype=float)
+            if self._clear(cam, p) or self._clear(cam, p + [0, 0, MAST_TOP_DZ]):
+                eta = float(s)
+                break
+        in_fov = abs(b_now) <= self.half_fov and r_now < OCCLUDED_MAX_RANGE_M
+        return {"jpeg": buf.getvalue(), "seg_visible": px >= 3, "seg_pixels": px, "seg_bearing_deg": sb,
+                "seg_range_m": sr, "bearing_deg": b_now, "range_m": r_now, "in_fov": bool(in_fov),
+                "reappear": reappear_answer(b3), "reappear_bearing_deg": b3, "reappear_range_m": r3,
+                "eta_s": eta, "los_now": eta == 0.0}
+
+
+def _fly_record(course, seed, every_s, backend, **episode_kw):
+    """Fly run.episode, recording at the eye's frames: every sighting (t, seg bearing, seg range, yaw), the
+    loss intervals of the eye's segmentation, and a snapshot (sim state, pose, the eye's target, the v3
+    context as collect_flight_v3 builds it) every `every_s`. -> (model, rover_at, oracle, snaps, sightings, losses)"""
+    import run, flight, courses
+    seconds = V3_SECONDS.get(course, 90.0)
+    if course == "classic":
+        rover_at, oracle = run.rover_pose, classic_oracle
+    else:
+        c = courses.make(course, seed)
+        rover_at, oracle = c.rover_pose, c.oracle
+    snaps, sightings, losses = [], [], []
+    st = {"last": -1e9, "m": None, "vis": None}
+    orig_look = flight.Eye.look
+
+    def look(self, data, pos, yaw, t):
+        sc = orig_look(self, data, pos, yaw, t)
+        tg = sc["target"]
+        vis = bool(tg["visible"])
+        st["m"] = self.m
+        if vis:
+            sightings.append((t, float(tg["bearing_deg"]), float(tg["range_m"]), float(yaw)))
+            if losses and losses[-1][1] is None:
+                losses[-1][1] = t
+        elif st["vis"] and sightings:
+            losses.append([t, None])
+        st["vis"] = vis
+        if t - st["last"] >= every_s - 1e-6:
+            st["last"] = t
+            seen = sightings[-1] if sightings else None
+            ctx = {"unseen_for_s": tg["unseen_for_s"],
+                   "last_seen_bearing_deg": None if seen is None else round(_wrap_deg(seen[1] - np.rad2deg(yaw - seen[3])), 1),
+                   "last_seen_range_m": None if seen is None else round(seen[2], 2)}
+            snaps.append({"t": round(t, 2), "t_raw": t, "pos": np.asarray(pos, dtype=float).copy(), "yaw": float(yaw),
+                          "state": {"qpos": data.qpos.copy(), "mocap_pos": data.mocap_pos.copy(),
+                                    "mocap_quat": data.mocap_quat.copy()},
+                          "visible": vis, "pixels": int(tg["pixels"]), "context": ctx, "n_sightings": len(sightings)})
+        return sc
+
+    flight.Eye.look = look
+    try:
+        run.episode(seed, seconds, use_jev=True, backend=backend, course=course, realtime=False, **episode_kw)
+    finally:
+        flight.Eye.look = orig_look
+    return st["m"], rover_at, oracle, snaps, sightings, losses
+
+
+def _frame(course, seed, sn, lab, stem, **extra):
+    """A v3 frame dict (collect_flight_v3's keys) from a snapshot and a labeller view."""
+    return dict({"course": course, "seed": seed, "t": sn["t"], "jpeg": lab["jpeg"], "stem": stem,
+                 "bearing_deg": lab["bearing_deg"], "range_m": lab["range_m"],
+                 "pos": [round(float(v), 2) for v in sn["pos"]], "in_fov": lab["in_fov"],
+                 "reappear": lab["reappear"], "reappear_bearing_deg": lab["reappear_bearing_deg"],
+                 "reappear_range_m": lab["reappear_range_m"], "eta_s": lab["eta_s"], "los_now": lab["los_now"]}, **extra)
+
+
+def collect_flight_v3b(course, seed, kind="rotated", n_views=2, every_s=None):
+    """v3b frames from one flight (see the block comment above). kind: "rotated" (oracle flight, rotated views)
+    or a V3B_FAILURE key (failure flight, natural views around losses). Frames have collect_flight_v3's keys
+    plus "stem", "view" ("rotated" / "natural"), "yaw_offset_deg", "source"."""
+    import zlib
+    rng = np.random.default_rng([seed, zlib.crc32(("%s/%s" % (course, kind)).encode())])
+    if kind == "rotated":
+        m, rover_at, oracle, snaps, sightings, _ = _fly_record(course, seed, every_s or 0.5,
+                                                               V3_COURSES.get(course, "const:oracle"))
+    else:
+        m, rover_at, oracle, snaps, sightings, losses = _fly_record(course, seed, every_s or 0.25, "const:oracle",
+                                                                    **V3B_FAILURE[kind])
+    lab = _V3Labeller(m, rover_at, oracle)
+    sight_t = np.array([s[0] for s in sightings]) if sightings else np.zeros(0)
+    frames = []
+    if kind == "rotated":
+        for sn in snaps:
+            if (sn["context"]["unseen_for_s"] or 0.0) > V3B_MAX_UNSEEN_S:
+                continue            # an aircraft left stranded far behind: not V3B_MAX_UNSEEN_S s more of it
+            lab.set_state(sn["state"])
+            pos, yaw, t = sn["pos"], sn["yaw"], sn["t_raw"]
+            cam = pos + lab.eye.NOSE_OFFSET_M * np.array([np.cos(yaw), np.sin(yaw), 0.0])
+            b3_nat, _ = _rel(cam, yaw, rover_at(t + probe.REAPPEAR_HORIZON_S))
+            for k in range(n_views):
+                off = _wrap_deg(b3_nat - _view_bearing(rng))
+                yv = yaw + np.deg2rad(off)
+                v = lab.view(pos, yv, t)
+                if v["seg_visible"]:
+                    ctx = {"unseen_for_s": 0.0, "last_seen_bearing_deg": round(v["seg_bearing_deg"], 1),
+                           "last_seen_range_m": v["seg_range_m"]}
+                else:
+                    u = float(rng.uniform(*V3B_LAG_S))
+                    i = int(np.searchsorted(sight_t[:sn["n_sightings"]], t - u, side="right")) - 1
+                    if i < 0:
+                        ctx = {"unseen_for_s": None, "last_seen_bearing_deg": None, "last_seen_range_m": None}
+                    else:
+                        ts, bs, rs, ys = sightings[i]
+                        ctx = {"unseen_for_s": round(t - ts, 2),
+                               "last_seen_bearing_deg": round(_wrap_deg(bs - np.rad2deg(yv - ys)), 1),
+                               "last_seen_range_m": round(rs, 2)}
+                frames.append(_frame(course, seed, sn, v, "v3b-rot-%s-%d-%06.2f-%d" % (course, seed, sn["t"], k),
+                                     visible=v["seg_visible"], pixels=v["seg_pixels"],
+                                     yaw_deg=round(float(np.rad2deg(yv)), 1), context=ctx, maneuver=None,
+                                     occluded=bool(v["in_fov"] and not v["seg_visible"]),
+                                     view="rotated", yaw_offset_deg=round(off, 1), source="rotated"))
+        return frames
+    windows = [(a - 1.0, min(b if b is not None else 1e9, a + 10.0)) for a, b in losses
+               if (b if b is not None else 1e9) - a >= 0.25]
+    for sn in snaps:
+        t = sn["t_raw"]
+        if not any(lo - 1e-6 <= t <= hi + 1e-6 for lo, hi in windows):
+            continue
+        lab.set_state(sn["state"])
+        v = lab.view(sn["pos"], sn["yaw"], t)
+        frames.append(_frame(course, seed, sn, v, "v3b-%s-%s-%d-%06.2f" % (kind, course, seed, sn["t"]),
+                             visible=sn["visible"], pixels=sn["pixels"], yaw_deg=round(float(np.rad2deg(sn["yaw"])), 1),
+                             context=sn["context"], maneuver=oracle(sn["pos"]),
+                             occluded=bool(v["in_fov"] and not sn["visible"]), view="natural", yaw_offset_deg=0.0,
+                             source=kind, seg_agrees=bool(v["seg_visible"] == sn["visible"])))
+    return frames
+
+
+def v3b_test_row(f, name):
+    """A probe-format row (rover_test_frames_v3's, plus view / yaw_offset_deg / source)."""
+    return dict(frame=name, **v3_frame_labels(f), view=f["view"], yaw_offset_deg=f["yaw_offset_deg"],
+                source=f["source"])
+
+
+def label_counts(recs):
+    """{question: {label name: n}} over v3 records."""
+    import collections
+    from tactics import MANEUVERS
+    names = {"reappear": list(probe.REAPPEAR), "maneuver": list(MANEUVERS), "occluded": ["false", "true"],
+             "reappear_eta": [str(i) for i in range(len(probe.REAPPEAR_ETA))]}
+    out = collections.defaultdict(collections.Counter)
+    for r in recs:
+        q = r["id"].rsplit("-", 1)[1]
+        out[q][names[q][r["label"]]] += 1
+    return {q: dict(sorted(c.items())) for q, c in sorted(out.items())}
+
+
+def balance_reappear(recs, max_share=None, seed=0):
+    """Subsample reappear records of an over-represented answer (seeded) to at most max_share of the reappear
+    records, e.g. {"ahead": 0.4}; every other record is kept."""
+    max_share = {"ahead": 0.4} if max_share is None else max_share
+    rea = list(probe.REAPPEAR)
+    idx = {k: [i for i, r in enumerate(recs) if r["id"].endswith("-reappear") and rea[r["label"]] == k] for k in rea}
+    n = sum(len(v) for v in idx.values())
+    rng, drop = np.random.default_rng(seed), set()
+    for k, share in max_share.items():
+        rest = n - len(idx[k])
+        cap = int(share / (1.0 - share) * rest)
+        if len(idx[k]) > cap:
+            drop |= set(rng.choice(idx[k], len(idx[k]) - cap, replace=False).tolist())
+    return [r for i, r in enumerate(recs) if i not in drop]
