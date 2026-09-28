@@ -413,7 +413,7 @@ def episode(seed=0, seconds=35.0, use_jev=True, video=None, hz=None, budget=None
             pursuit_questions="v1", pursuit_sharpen=None, pursuit_gain=None, pursuit_range=None,
             speed_law="auto", speed_params=None, guide_tune=None, reacquire=None, reacquire_model=None,
             reacquire_hz=3.0, reacquire_params=None, reacquire_wrong_p=0.0, reacquire_delay_s=0.0,
-            tactics_kw=None):
+            tactics_kw=None, appearance=None):
     """`record`: a list to append a snapshot to every 0.2 s of sim time (pose, obstacles,
     judgment, and the camera frame the model saw), for rendering after the flight
     (flightgif.py). Cheap, so the flight stays real time.
@@ -449,18 +449,29 @@ def episode(seed=0, seconds=35.0, use_jev=True, video=None, hz=None, budget=None
     the code's segmentation) has not seen the rover for reacquire_params["after_s"] (1 s), the frame + v3
     context goes to laya_pursuit.Reacquirer at most `reacquire_hz` times a second, and Guidance turns toward
     the predicted side instead of holding course or the extrapolated search (run.REACQ_DEFAULTS,
-    Guidance._reappear_heading)."""
+    Guidance._reappear_heading).
+
+    `appearance`: realism.py's real-world look (textures, sky, scanned clutter) for a courses.py course, as a
+    spec ("real", "tex+sky+c20", ...) or dict; None (default) leaves the scene as it is. A course-name suffix
+    does the same without this argument ("mixed@real"); when both are given this one replaces the suffix."""
     rng = np.random.default_rng(seed)
     lap_course = None                # a looped course (town.py): laps, not an end line
     if course == "classic":
+        if appearance is not None:
+            raise ValueError("appearance needs a courses.py course, not classic (world.xml)")
         m = mujoco.MjModel.from_xml_path("world.xml")
         drive, rover_at, barrier_x, end_x, oracle = drive_course, rover_pose, 19.0, 77.0, None
     else:
         import courses
         c = courses.make(course, seed)
+        if appearance is not None:           # realism.py (a "@" suffix on the course name needs none of this)
+            import realism
+            realism.set_appearance(c, appearance, seed)
+            c.name = "%s@%s" % (c.name.split("@")[0], realism.tag(appearance))    # its own .course_*.xml
         m = mujoco.MjModel.from_xml_path(c.write(os.path.dirname(os.path.abspath(__file__))))
         drive, rover_at, barrier_x, end_x, oracle = c.drive, c.rover_pose, c.first_barrier_x, c.end_x, c.oracle
         lap_course = c if getattr(c, "looped", False) else None
+        look = getattr(c, "appearance", None)       # (c is reused below)
     d = mujoco.MjData(m)
     dt = m.opt.timestep
     x2 = m.body("x2").id
@@ -754,6 +765,8 @@ def episode(seed=0, seconds=35.0, use_jev=True, video=None, hz=None, budget=None
         out["jev"] = tac.stats()
         tac.close()
     out["pursuit"] = pursuit
+    if course != "classic" and look:
+        out["appearance"] = dict(look)
     # S-path (weaving) metrics, pathmetrics.py
     import pathmetrics
     tr = np.array(track)
@@ -820,6 +833,9 @@ if __name__ == "__main__":
     p.add_argument("--lockstep", action="store_true", help="pause the sim while the model decides (no latency)")
     p.add_argument("--out", default=None, help="append one JSON line per episode to this file")
     p.add_argument("--course", default="classic", help="classic (world.xml) or a layout in courses.py")
+    p.add_argument("--appearance", default=None,
+                   help="realism.py look for a courses.py course, e.g. real, tex+sky+c20, real+neg (or JSON); "
+                        "same as a course suffix like mixed@real")
     p.add_argument("--pursuit", default="code",
                    choices=["code", "laya-strips", "laya-frame", "laya-pursuit", "sim", "sim-pursuit"],
                    help="source of the pursuit heading (range/speed stay the code's, except laya-pursuit and "
@@ -875,7 +891,8 @@ if __name__ == "__main__":
                     reacquire=a.reacquire, reacquire_model=a.reacquire_model, reacquire_hz=a.reacquire_hz,
                     reacquire_wrong_p=a.reacquire_wrong, reacquire_delay_s=a.reacquire_delay,
                     reacquire_params={k: (v if k == "ahead" else float(v))
-                                      for k, v in (kv.split("=", 1) for kv in a.reacquire_param)} or None)
+                                      for k, v in (kv.split("=", 1) for kv in a.reacquire_param)} or None,
+                    appearance=a.appearance)
         print(json.dumps(r))
         sys.stdout.flush()
         if a.out:

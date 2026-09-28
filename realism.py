@@ -23,7 +23,7 @@ A spec is '+'-separated tokens (no commas, so it survives modal_laya's --courses
 or the same as a dict: {"textures": "polyhaven", "sky": "polyhaven", "clutter": 10, "hard_negatives":
 False, "seed": None}. JSON of that dict is accepted wherever a string is.
 
-Assets are fetched on first use into CACHE (realism_assets/cache, gitignored; override with
+Assets are fetched on first use into CACHE (~/.cache/jev-drone-realism, outside the repo; override with
 $JEV_REALISM_CACHE) from polyhaven.com (api.polyhaven.com / dl.polyhaven.org) and
 raw.githubusercontent.com (kevinzakka/mujoco_scanned_objects, pinned commit). `python realism.py fetch`
 pre-fetches all of them (~25 MB). Only realism_assets/ATTRIBUTION.md and the small city data are committed.
@@ -36,7 +36,9 @@ import numpy as np
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 ASSET_DIR = os.path.join(HERE, "realism_assets")
-CACHE = os.environ.get("JEV_REALISM_CACHE") or os.path.join(ASSET_DIR, "cache")
+# outside the repo on purpose: modal_laya.py mounts the repo into every container, and ~60 MB of textures
+# there would ride along with every launch; a Modal container fetches what it needs on first use instead
+CACHE = os.environ.get("JEV_REALISM_CACHE") or os.path.join(os.path.expanduser("~"), ".cache", "jev-drone-realism")
 UA = "jev-drone-realism/1.0 (MuJoCo drone sim; asset fetch)"
 TEX_PX = 512                 # textures are cached at 512 px: the onboard frame is 512x384 at a 110 deg lens
 SKY_FACE = 512               # cube face size of the skybox
@@ -63,6 +65,9 @@ TEXTURES = {
     "metal": ["blue_metal_plate", "painted_metal_shutter", "corrugated_iron_03", "worn_corrugated_iron",
               "container_side", "green_metal_rust"],
     "roof": ["bitumen", "grey_roof_01", "grey_roof_tiles_02", "roof_slates_03"],
+    "asphalt": ["aerial_asphalt_01", "asphalt_02", "asphalt_04", "asphalt_06", "clean_asphalt"],
+    "pavement": ["concrete_pavement_02", "cobblestone_floor_001", "cobblestone_floor_08", "patterned_cobblestone",
+                 "hangar_concrete_floor", "granular_concrete"],
     "bark": ["palm_tree_bark", "japanese_sycamore"],
     "leaf": ["moss_wood"],
 }
@@ -74,6 +79,8 @@ HARD_NEGATIVE_TEXTURES = {
     "wood": [],
     "metal": ["rusty_metal_03", "rusty_corrugated_iron"],
     "roof": ["clay_roof_tiles_02", "roof_tiles"],
+    "asphalt": [],
+    "pavement": ["brick_pavement", "terracotta_floor_tiles"],
     "bark": ["bark_brown_01"],
     "leaf": [],
 }
@@ -84,10 +91,12 @@ SKIES = ["kloofendal_48d_partly_cloudy_puresky", "kloofendal_43d_clear_puresky",
 MATERIAL_POOL = {"grid": "ground", "wall": "wall", "low": "low", "blue": "wall", "yellow": "wall",
                  "roofE": "roof", "roofW": "roof", "roof": "roof", "door": "wood", "fence": "wood",
                  "bus": "metal", "truck": "metal", "cab": "metal", "burnt": "metal", "crate": "wood",
-                 "shed": "wood", "bark": "bark", "leaf": "leaf", "facade": "wall", "street": "ground"}
+                 "shed": "wood", "bark": "bark", "leaf": "leaf", "facade": "wall", "street": "asphalt",
+                 "pavement": "pavement"}
 KEEP = {"rover", "window", "cityfloor"}
 # metres per texture repeat, per pool (texuniform: the texture keeps its real-world scale on every face)
-TILE_M = {"ground": 4.0, "wall": 3.0, "low": 2.0, "wood": 2.0, "metal": 2.5, "roof": 3.0, "bark": 1.0, "leaf": 1.5}
+TILE_M = {"ground": 4.0, "wall": 3.0, "low": 2.0, "wood": 2.0, "metal": 2.5, "roof": 3.0, "bark": 1.0, "leaf": 1.5,
+          "asphalt": 4.0, "pavement": 2.5}
 # neutral tints (multiplied into the texture): greys, creams, cool and green hues -- never red
 TINTS = [(1, 1, 1), (.92, .92, .92), (.8, .8, .82), (1, .97, .88), (.88, .93, 1), (.85, .95, .88), (.95, .95, .8),
          (.75, .8, .9), (.7, .7, .7)]
@@ -192,6 +201,40 @@ def texture(tid):
     return png, json.load(open(meta))
 
 
+FACADE_STYLES = [  # (window x0, x1, y0, y1 as fractions of a bay / storey, frame rgb)
+    (0.28, 0.72, 0.25, 0.78, (215, 215, 210)), (0.22, 0.78, 0.22, 0.72, (60, 60, 62)),
+    (0.33, 0.67, 0.20, 0.80, (235, 232, 220))]
+
+
+def facade(tid, style=0):
+    """Cached facade texture: texture `tid` as one window bay (BAY_W x one storey, city.py) with a window drawn
+    on: dark blue-grey glass, a frame and a sill (no red)."""
+    png = os.path.join(CACHE, "facades", "%s_w%d.png" % (tid, style))
+    if not os.path.exists(png):
+        from PIL import Image, ImageDraw
+        base, _ = texture(tid)
+        im = Image.open(base).convert("RGB")
+        n = im.size[0]
+        x0, x1, y0, y1, frame = FACADE_STYLES[style % len(FACADE_STYLES)]
+        dr = ImageDraw.Draw(im)
+        box = [int(x0 * n), int(y0 * n), int(x1 * n), int(y1 * n)]
+        dr.rectangle([box[0] - 10, box[1] - 10, box[2] + 10, box[3] + 10], fill=frame)
+        dr.rectangle(box, fill=(48, 58, 70))
+        mid = (box[0] + box[2]) // 2
+        dr.rectangle([mid - 5, box[1], mid + 5, box[3]], fill=frame)              # mullion
+        dr.rectangle([box[0], (box[1] + box[3]) // 2 - 4, box[2], (box[1] + box[3]) // 2 + 4], fill=frame)
+        g = np.asarray(im).astype(float)                     # a faint sky reflection in the upper panes
+        yy = np.arange(n)[:, None]
+        pane = (yy > box[1]) & (yy < (box[1] + box[3]) // 2)
+        g[box[1]:box[3], box[0]:box[2]] += np.where(pane[box[1]:box[3]], 18.0, 0.0)[..., None]
+        im = Image.fromarray(np.clip(g, 0, 255).astype(np.uint8))
+        dr = ImageDraw.Draw(im)
+        dr.rectangle([box[0] - 16, box[3] + 10, box[2] + 16, box[3] + 22], fill=(190, 190, 185))   # sill
+        os.makedirs(os.path.dirname(png), exist_ok=True)
+        im.save(png)
+    return png
+
+
 def _read_hdr(path):
     """Radiance .hdr (RGBE, new-style RLE) -> float32 (H, W, 3)."""
     data = open(path, "rb").read()
@@ -290,6 +333,49 @@ def scanned_object(name):
     return obj, tex, json.load(open(meta))
 
 
+def decimated(obj, cells=22):
+    """A light copy of a scanned object's mesh (model_lo.obj next to it, made once): vertex clustering on a grid
+    of `cells` along the largest side. Positions in a cell merge to their mean; each face corner keeps its own
+    texture coordinate (OBJ's separate v/vt indices), so the texture still lands where it did; faces that
+    collapse are dropped. ~10x fewer faces: the software renderer draws every one of them every frame."""
+    out = obj[:-4] + "_lo%d.obj" % cells
+    if os.path.exists(out):
+        return out
+    V, VT, F = [], [], []
+    for ln in open(obj):
+        if ln.startswith("v "):
+            V.append([float(x) for x in ln.split()[1:4]])
+        elif ln.startswith("vt "):
+            VT.append(ln.split()[1:3])
+        elif ln.startswith("f "):
+            F.append([tuple(int(i) if i else 0 for i in (c.split("/") + ["", ""])[:2]) for c in ln.split()[1:]])
+    V = np.array(V)
+    lo, hi = V.min(0), V.max(0)
+    h = float((hi - lo).max()) / cells
+    key = np.floor((V - lo) / h).astype(np.int64)
+    _, cid, counts = np.unique(key, axis=0, return_inverse=True, return_counts=True)
+    cid = cid.ravel()
+    P = np.zeros((counts.size, 3))
+    np.add.at(P, cid, V)
+    P /= counts[:, None]
+    tris = set()
+    lines = []
+    for f in F:
+        for k in range(1, len(f) - 1):
+            c = (f[0], f[k], f[k + 1])
+            ids = tuple(int(cid[v - 1]) for v, _ in c)
+            if len(set(ids)) < 3 or tuple(sorted(ids)) in tris:
+                continue
+            tris.add(tuple(sorted(ids)))
+            lines.append("f " + " ".join("%d/%d" % (i + 1, t) for i, (_, t) in zip(ids, c)))
+    with open(out + ".part", "w") as fh:
+        fh.write("".join("v %.5f %.5f %.5f\n" % tuple(p) for p in P))
+        fh.write("".join("vt %s %s\n" % tuple(t) for t in VT))
+        fh.write("\n".join(lines) + "\n")
+    os.replace(out + ".part", out)
+    return out
+
+
 def fetch(verbose=True, negatives=True):
     """Pre-fetch everything the catalogue names (what `apply` would otherwise fetch on first use)."""
     ok, bad = [], []
@@ -350,6 +436,14 @@ def parse(spec, seed=0):
     return out
 
 
+def tag(spec):
+    """A short file-name-safe tag for a spec: the token string itself, or a hash of a dict / JSON spec."""
+    if isinstance(spec, str) and re.fullmatch(r"[A-Za-z0-9+]+", spec):
+        return spec
+    import hashlib
+    return "a" + hashlib.md5(json.dumps(spec, sort_keys=True).encode()).hexdigest()[:8]
+
+
 def split_name(name):
     """'mixed@real' -> ('mixed', 'real'); 'mixed' -> ('mixed', None)."""
     base, _, spec = name.partition("@")
@@ -367,7 +461,19 @@ def make(name, seed=0):
 
 
 def set_appearance(course, spec, seed=None):
-    course.appearance = parse(spec, course.seed if seed is None else seed)
+    """Give `course` an appearance. A course with a base_appearance (city.py: always textured, with a sky)
+    keeps it, with the spec's settings on top."""
+    seed = course.seed if seed is None else seed
+    app = parse(spec, seed)
+    base = getattr(course, "base_appearance", None)
+    if base:
+        merged = parse(dict(base), seed)
+        for k, v in (app or {}).items():
+            if v and k != "seed":
+                merged[k] = v
+        merged["seed"] = app["seed"] if app else seed
+        app = merged
+    course.appearance = app
     return course
 
 
@@ -383,6 +489,7 @@ def apply(xml, course):
     rng = np.random.default_rng([int(app["seed"]), 9173])
     neg = bool(app.get("hard_negatives"))
     extra_assets = []
+    textured = {}                      # material -> metres per texture repeat, for _boxes_to_meshes
     if app.get("textures"):
         used = {}
         def pick(pool):
@@ -408,18 +515,34 @@ def apply(xml, course):
             ind, name, rest = mo.group(1), mo.group(2), mo.group(3)
             if name in KEEP or name.startswith("keep_"):
                 return mo.group(0)
-            base = re.sub(r"\d+$", "", name)
+            uv = name.startswith("uv_")        # a mesh with texture coordinates (city.py): a 2d texture
+            base = re.sub(r"\d+$", "", name[3:] if uv else name)
             pool = MATERIAL_POOL.get(name, MATERIAL_POOL.get(base, "wall"))
             tid, png = pick(pool)
             if tid is None:
                 return mo.group(0)
             tint = TINTS[int(rng.integers(len(TINTS)))] if pool not in ("bark", "leaf") else (1, 1, 1)
             rep = 1.0 / TILE_M.get(pool, 3.0)
-            extra_assets.append('%s<texture name="rt_%s" type="2d" file="%s"/>\n' % (ind, name, png))
-            return ('%s<material name="%s" texture="rt_%s" texrepeat="%.3f %.3f" texuniform="true" '
+            # MuJoCo maps a 2d texture on a primitive by its x-y coordinates, which streaks vertical faces; boxes,
+            # cylinders and spheres get the same image as a cube texture instead. The floor is a plane: 2d.
+            if uv and base == "facade":       # city facades: the wall texture with a window per bay and storey
+                png = facade(tid, int(rng.integers(3)))
+            kind = "2d" if (uv or name in ("grid", "street")) else "cube"
+            if kind == "cube":                # boxes become textured meshes below (2d); others keep the cube
+                extra_assets.append('%s<texture name="rt2_%s" type="2d" file="%s"/>\n' % (ind, name, png))
+                extra_assets.append('%s<material name="%s_uv" texture="rt2_%s" rgba="%.2f %.2f %.2f 1" '
+                                    'reflectance="0" specular="0.1"/>\n' % (ind, name, name, tint[0], tint[1], tint[2]))
+            if uv:
+                rep = 1.0                     # the mesh's texture coordinates are already in texture repeats
+            else:
+                textured[name] = TILE_M.get(pool, 3.0)
+            extra_assets.append('%s<texture name="rt_%s" type="%s" file="%s"/>\n' % (ind, name, kind, png))
+            return ('%s<material name="%s" texture="rt_%s" texrepeat="%.3f %.3f" texuniform="%s" '
                     'rgba="%.2f %.2f %.2f 1" reflectance="0" specular="0.1"/>\n'
-                    % (ind, name, name, rep, rep, tint[0], tint[1], tint[2]))
+                    % (ind, name, name, rep, rep, "false" if uv else "true", tint[0], tint[1], tint[2]))
         xml = _MAT.sub(sub, xml)
+        xml, meshes = _boxes_to_meshes(xml, textured)
+        extra_assets += meshes
     if app.get("sky"):
         hid = SKIES[int(rng.integers(len(SKIES)))]
         try:
@@ -432,7 +555,11 @@ def apply(xml, course):
         el = np.deg2rad(rng.uniform(45, 80))
         az = rng.uniform(0, 2 * np.pi)
         dvec = -np.array([np.cos(el) * np.cos(az), np.cos(el) * np.sin(az), np.sin(el)])
-        lvl = rng.uniform(0.5, 0.75)
+        lvl = rng.uniform(0.6, 0.85)
+        # a dimmer headlight so the sun's shading and shadows show (the plain scenes light everything from the camera)
+        amb = rng.uniform(0.3, 0.4)
+        xml = re.sub(r'<headlight diffuse="[^"]+" ambient="[^"]+"/>',
+                     '<headlight diffuse=".3 .3 .3" ambient="%.2f %.2f %.2f"/>' % (amb, amb, amb), xml, count=1)
         xml = re.sub(r'<light pos="([^"]+)" dir="0 0 -1" directional="true" diffuse="[^"]+"/>',
                      lambda mo: '<light pos="%s" dir="%.3f %.3f %.3f" directional="true" diffuse="%.2f %.2f %.2f"/>'
                      % (mo.group(1), dvec[0], dvec[1], dvec[2], lvl, lvl, lvl * 0.97), xml, count=1)
@@ -447,6 +574,59 @@ def apply(xml, course):
         k = xml.index('    <body name="rover"')
         xml = xml[:k] + "".join(geoms) + xml[k:]
     return xml
+
+
+_BOX = re.compile(r'<geom name="([^"]+)" type="box" material="([^"]+)" size="([^"]+)" pos="([^"]+)"/>')
+
+
+def _box_mesh(name, sx, sy, sz, tile):
+    """An inline MJCF mesh of a box of half-sizes (sx, sy, sz), 4 vertices per face so every face has its own
+    texture coordinates, in metres / tile (the texture keeps its real-world scale on every face)."""
+    V, T, F = [], [], []
+    for ax in range(3):
+        for sgn in (1, -1):
+            a, b = [k for k in range(3) if k != ax]
+            h = np.array([sx, sy, sz])
+            quad = []
+            for ua, ub in ((-1, -1), (1, -1), (1, 1), (-1, 1)):
+                p = np.zeros(3)
+                p[ax], p[a], p[b] = sgn * h[ax], ua * h[a], ub * h[b]
+                quad.append(p)
+                T.append(((p[a] + h[a]) / tile, (p[b] + h[b]) / tile))
+            n0 = len(V)
+            V += quad
+            # outward winding: (a x b) points along +ax for a cyclic (ax, a, b); flip otherwise
+            cyc = (a - ax) % 3 == 1
+            f1, f2 = (n0, n0 + 1, n0 + 2), (n0, n0 + 2, n0 + 3)
+            if (sgn > 0) != cyc:
+                f1, f2 = f1[::-1], f2[::-1]
+            F += [f1, f2]
+    fmt = lambda a: " ".join("%.4g" % x for x in np.ravel(a))  # noqa: E731
+    return '    <mesh name="%s" vertex="%s" texcoord="%s" face="%s"/>\n' % (
+        name, fmt(V), fmt(T), " ".join("%d" % i for f in F for i in f))
+
+
+def _boxes_to_meshes(xml, textured):
+    """Every box geom with a textured material -> seen as the same box as a mesh with texture coordinates (a 2d
+    texture on a primitive streaks: MuJoCo maps it by the geom's x-y). The box itself stays where it is, with
+    its name and index, hidden (group 3): contacts, and so flights, are exactly the plain course's. The meshes
+    (no collision) go at the end of the world, just before the rover."""
+    meshes, visuals = [], []
+
+    def sub(mo):
+        name, mat, size, pos = mo.groups()
+        if mat not in textured:
+            return mo.group(0)
+        sx, sy, sz = map(float, size.split())
+        meshes.append(_box_mesh("rbox_" + name, sx, sy, sz, textured[mat]))
+        visuals.append('    <geom name="%s_vis" type="mesh" mesh="rbox_%s" material="%s_uv" pos="%s" contype="0" '
+                       'conaffinity="0"/>\n' % (name, name, mat, pos))
+        return mo.group(0)[:-2] + ' group="3" rgba="0 0 0 0"/>'
+    xml = _BOX.sub(sub, xml)
+    if visuals:
+        k = xml.index('    <body name="rover"')
+        xml = xml[:k] + "".join(visuals) + xml[k:]
+    return xml, meshes
 
 
 # ----------------------------------------------------------------------------------------------- clutter
@@ -480,16 +660,31 @@ def _region(course):
     import courses                                      # a corridor (courses.Course)
     zones = []
     for kind, x, _side in course.stations:
-        zones.append({"beam": (x - 3.0, x + 3.0), "pocket": (x - 5.0, x + courses.POCKET_D + 3.0),
-                      "decoy": (x - 5.0, x + 8.5)}[kind])
+        # the station plus most of the approach where the drone swings out toward a gap (decoy: 8 m before, the
+        # rover leaves the centre line 5 m before; pocket: 8 m before, 5 m after)
+        zones.append({"beam": (x - 4.0, x + 3.0), "pocket": (x - 8.0, x + courses.POCKET_D + 5.0),
+                      "decoy": (x - 8.0, x + 9.0)}[kind])
+
+    # dead ends nobody has to fly through: the pocket without the rover's hatches, and the decoy's blind recess
+    dead = []
+    for kind, x, side in course.stations:
+        if kind == "pocket":           # the rover drives through the pocket on side -side; this one is on +side
+            ys = sorted((side * (courses.LANE_W / 2 + 0.2), side * (courses.HALF_W - 0.1)))
+            dead.append((x + 0.2, x + courses.POCKET_D - 0.4, ys[0], ys[1]))
+        elif kind == "decoy":
+            ys = sorted((-side * (courses.HALF_W - 0.4), -side * (courses.HALF_W - 0.4 - courses.GAP_W)))
+            dead.append((x + 0.2, x + 7.0, ys[0], ys[1]))
 
     def ok(x, y, r):
+        if np.hypot(P[:, 0] - x, P[:, 1] - y).min() < 2.5 + r:
+            return False
+        for a0, a1, b0, b1 in dead:
+            if a0 + r + 0.3 <= x <= a1 - r - 0.3 and b0 + r + 0.3 <= y <= b1 - r - 0.3:
+                return True
         if abs(y) < 2.8 + r or abs(y) > courses.HALF_W - 0.15 - r:     # off the centre line, inside the walls
             return False
-        if any(a - r <= x <= b + r for a, b in zones):
-            return False
-        return np.hypot(P[:, 0] - x, P[:, 1] - y).min() >= 2.0 + r
-    return (4.0, course.end_x + 6.0, -courses.HALF_W, courses.HALF_W), ok
+        return not any(a - r <= x <= b + r for a, b in zones)
+    return (4.0, course.end_x + 8.0, -courses.HALF_W, courses.HALF_W), ok
 
 
 def _clutter(course, n, rng, neg):
@@ -523,13 +718,86 @@ def _clutter(course, n, rng, neg):
         assets.append('    <texture name="%s_t" type="2d" file="%s"/>\n'
                       '    <material name="keep_%s" texture="%s_t" specular="0.2"/>\n'
                       '    <mesh name="%s" file="%s" scale="%.4f %.4f %.4f"/>\n'
-                      % (mname, tex, mname, mname, mname, obj, s, s, s))
+                      % (mname, tex, mname, mname, mname, decimated(obj), s, s, s))
         # the mesh is re-centred by MuJoCo on compile and the geom frame moved to match, so pos is where the
         # object's own origin (centre of its base) lands: on the floor
         geoms.append('    <geom name="clutter%d" type="mesh" mesh="%s" material="keep_%s" pos="%.3f %.3f 0" '
                      'euler="0 0 %.1f"/>\n' % (k, mname, mname, x, y, rng.uniform(0, 360)))
     course.clutter = placed                 # (x, y, radius) of each object, for maps and checks
     return assets, geoms
+
+
+# ------------------------------------------------------------------------------------------ frames, checks
+def onboard(name, seed=0, times=(5.0, 30.0, 55.0, 80.0), back=4.0, size=(512, 384)):
+    """Onboard camera frames (the RGB frame Laya sees: flight.Eye's lens) from `back` m behind the rover along its
+    path, at rover time `times`. Returns [(rgb, rover mask, seconds to render)], the mask from a segmentation
+    render at the same size."""
+    import time
+    import mujoco, courses, flight
+    c = courses.make(name, seed)
+    m = mujoco.MjModel.from_xml_path(c.write(HERE))
+    d = mujoco.MjData(m)
+    eye = flight.Eye(m, rgb_size=size)
+    seg = mujoco.Renderer(m, size[1], size[0])
+    seg.enable_segmentation_rendering()
+    rover = np.nonzero(m.geom_bodyid == m.body("rover").id)[0]
+    out = []
+    for t in times:
+        c.drive(m, d, t)
+        r = c.rover_pose(t)
+        if getattr(c, "looped", False):
+            p, _ = c._at(c.rover_u(t) - back)
+        else:
+            import courses as cs
+            p = (r[0] - back, c.rover_pose(max(t - back / cs.ROVER_SPEED, 0.0))[1])
+        yaw = float(np.arctan2(r[1] - p[1], r[0] - p[0]))
+        d.qpos[:7] = [p[0], p[1], 1.6, np.cos(yaw / 2), 0, 0, np.sin(yaw / 2)]
+        mujoco.mj_forward(m, d)
+        t0 = time.time()
+        eye.look(d, d.qpos[:3], yaw, t)
+        dt = time.time() - t0
+        seg.update_scene(d, eye.cam)
+        mask = np.isin(seg.render()[:, :, 0], rover)
+        out.append((eye.last_rgb.copy(), mask, dt))
+    return out
+
+
+def red_check(frames):
+    """Per frame: rover-coloured pixels on the rover and off it (anything off it could be taken for the rover),
+    and all red/orange/brown pixels off it."""
+    rows = []
+    for rgb, mask, _ in frames:
+        rl = rover_like(rgb)
+        rows.append({"rover_px": int(mask.sum()), "rover_like_on_rover": int((rl & mask).sum()),
+                     "rover_like_elsewhere": int((rl & ~mask).sum()),
+                     "red_brown_elsewhere_pct": round(100 * red_fraction(np.where(mask[..., None], 0, rgb)), 2)})
+    return rows
+
+
+def docs(names=("mixed@real", "town@real", "city", "city@real"), seed=0, out_dir=None):
+    """docs/realism-<name>.png: four onboard frames of each course (2x2, half size), plus the maps
+    docs/course-<name>.png (courses.render). Prints the red check."""
+    from PIL import Image
+    import courses
+    out_dir = out_dir or os.path.join(HERE, "docs")
+    for name in names:
+        tag_ = name.replace("@", "-")
+        times = (8.0, 45.0, 90.0, 140.0) if name.startswith("city") else \
+            (5.0, 30.0, 55.0, 80.0) if name.startswith("town") else (4.0, 14.0, 27.0, 44.0)
+        fr = onboard(name, seed, times)
+        tiles = [Image.fromarray(f[0]).resize((384, 288), Image.LANCZOS) for f in fr]
+        grid = Image.new("RGB", (768, 576))
+        for k, im in enumerate(tiles):
+            grid.paste(im, ((k % 2) * 384, (k // 2) * 288))
+        grid.quantize(192, method=Image.Quantize.MEDIANCUT).save(os.path.join(out_dir, "realism-%s.png" % tag_),
+                                                                 optimize=True)
+        if name != "city@real":
+            im = Image.open(io.BytesIO(courses.render(name, seed, HERE))).convert("RGB")
+            if im.size[0] > 900:
+                im = im.resize((900, round(im.size[1] * 900 / im.size[0])), Image.LANCZOS)
+            im.quantize(128, method=Image.Quantize.MEDIANCUT).save(os.path.join(out_dir, "course-%s.png" % tag_),
+                                                                   optimize=True)
+        print(name, "render ms", [round(1000 * f[2]) for f in fr], red_check(fr))
 
 
 # ------------------------------------------------------------------------------------------------- CLI
@@ -539,5 +807,7 @@ if __name__ == "__main__":
         print("fetched %d, failed %d" % (len(ok), len(bad)))
         for b in bad:
             print("  ", *b)
+    elif len(sys.argv) > 1 and sys.argv[1] == "docs":
+        docs(*([sys.argv[2].split(",")] if len(sys.argv) > 2 else []))
     else:
         print(__doc__)
