@@ -70,6 +70,38 @@ def questions_v2():
             "range8": {"type": "score", "instructions": ctx + "How far away is the red rover?", "criteria": RANGE8}}
 
 
+# v3 questions (drone-rover-v3) add reacquisition and tactics to v2's perception. The state is the
+# onboard frame plus a small JSON context (V3_CONTEXT_KEYS) that a flight can always supply: how long
+# the rover has been out of sight and where it was last seen, relative to the current nose.
+V3_CONTEXT_KEYS = ("unseen_for_s", "last_seen_bearing_deg", "last_seen_range_m")
+REAPPEAR = {"left": "it will come back into view on the left, more than 20 degrees off the nose",
+            "ahead": "it will come back into view ahead, within 20 degrees of the nose",
+            "right": "it will come back into view on the right, more than 20 degrees off the nose",
+            "behind": "it is behind the aircraft, more than 90 degrees off the nose: turn around to find it"}
+REAPPEAR_ETA = ["within 2 seconds", "in 2 to 5 seconds", "in 5 to 10 seconds", "in more than 10 seconds"]
+REAPPEAR_ETA_EDGES = [2.0, 5.0, 10.0]   # s
+REAPPEAR_HORIZON_S = 3.0   # `reappear` is about where the rover will be this far ahead
+
+
+def questions_v3():
+    """v2's perception questions plus occluded / reappear / reappear_eta, and the tactical `maneuver`
+    choice with tactics.MANEUVERS as its options (label: the course oracle's answer)."""
+    from tactics import MANEUVERS
+    qs = questions_v2()
+    ctx = qs["visible"]["instructions"].split("Is the red rover")[0]
+    qs.update({
+        "occluded": {"type": "noul", "instructions": ctx + "The rover is out of sight. Is it hidden behind an "
+                     "obstacle in view (as opposed to off to the side or behind the aircraft)?"},
+        "reappear": {"type": "choice", "instructions": ctx + "The rover is out of sight. Where will it be in a "
+                     "few seconds, relative to where the aircraft is pointing now?", "criteria": REAPPEAR},
+        "reappear_eta": {"type": "score", "instructions": ctx + "The rover is out of sight. How soon will it be "
+                         "visible again from here?", "criteria": REAPPEAR_ETA},
+        "maneuver": {"type": "choice", "instructions": ctx + "Which single maneuver should the aircraft commit "
+                     "to right now to keep following the rover without hitting anything?", "criteria": MANEUVERS},
+    })
+    return qs
+
+
 def steer_level(b):
     return int(sum(b < e for e in STEER_EDGES))
 
