@@ -34,6 +34,46 @@ def steer_target(b):
     return t
 
 
+def soft_target(v, centres):
+    """A soft target over score levels whose centres are monotone (either direction): linear between the
+    two centres either side of v, all weight on the end level outside the range."""
+    c = list(centres)
+    lo_first = c[0] < c[-1]
+    t = [0.0] * len(c)
+    if (v <= c[0]) == lo_first:
+        t[0] = 1.0
+        return t
+    if (v >= c[-1]) == lo_first:
+        t[-1] = 1.0
+        return t
+    for k in range(len(c) - 1):
+        a, b = c[k], c[k + 1]
+        if min(a, b) <= v <= max(a, b):
+            w = (v - b) / (a - b)
+            t[k], t[k + 1] = w, 1.0 - w
+            return t
+    return t
+
+
+def v2_records(v1_recs, image_prefix="../drone_rover/"):
+    """drone_rover_v2 from drone_rover's records: strips, visible and where unchanged; steer -> steer7
+    and speed -> range8 (probe.questions_v2), soft targets from the stored true bearing and range.
+    Images are the v1 set's, referenced relative to the v2 directory."""
+    qs = probe.questions_v2()
+    out = []
+    for r in v1_recs:
+        r = dict(r, image=image_prefix + r["image"])
+        kind = r["id"].rsplit("-", 1)[-1]
+        if kind == "steer":
+            t = soft_target(r["bearing_deg"], probe.STEER7_CENTRES)
+            r.update(id=r["id"][:-5] + "steer7", question=qs["steer7"], label=int(np.argmax(t)), target=t)
+        elif kind == "speed":
+            t = soft_target(r["range_m"], probe.RANGE8_CENTRES)
+            r.update(id=r["id"][:-5] + "range8", question=qs["range8"], label=int(np.argmax(t)), target=t)
+        out.append(r)
+    return out
+
+
 def collect_flight(course, seed, seconds=60.0, every_s=0.5, jitter_views=2, jitter_deg=45.0):
     """Fly the oracle and return frames: {"jpeg", "strips": [jpeg]*5, labels}. The colour frame is rendered
     only for the views kept (not 15 times a second), with the eye's own segmentation for the labels."""

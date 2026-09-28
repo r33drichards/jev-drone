@@ -43,6 +43,33 @@ def x_to_bearing(x):
     return float(np.rad2deg(np.arctan((0.5 - x) * 2 * TAN_H)))
 
 
+# v2 questions (drone-rover-v2): wider steering and a finer range, both trained with soft targets
+# spread between the two levels either side of the true value (rover_data.soft_target). v1 topped
+# out at +-27 deg and read large bearings far too small; its 4 speed bands gave ~1-1.7 m range error
+# in flight, too coarse to set forward speed.
+STEER7_CENTRES = [60.0, 35.0, 15.0, 0.0, -15.0, -35.0, -60.0]      # deg, + left; level 0 = hardest left
+STEER7 = ["hard left: the rover is at the far left edge of the image, about 60 degrees off",
+          "left: the rover is well left of centre, about 35 degrees",
+          "slightly left: the rover is a little left of centre, about 15 degrees",
+          "straight: the rover is at the centre of the image",
+          "slightly right: the rover is a little right of centre, about 15 degrees",
+          "right: the rover is well right of centre, about 35 degrees",
+          "hard right: the rover is at the far right edge of the image, about 60 degrees off"]
+RANGE8_CENTRES = [2.0, 2.5, 3.0, 3.5, 4.0, 4.75, 6.0, 8.5]           # m
+RANGE8 = ["about 2 metres away, very close", "about 2.5 metres away", "about 3 metres away",
+          "about 3.5 metres away", "about 4 metres away", "about 4.75 metres away",
+          "about 6 metres away", "about 8.5 metres or more away, far"]
+
+
+def questions_v2():
+    qs = questions()
+    ctx = qs["visible"]["instructions"].split("Is the red rover")[0]
+    return {"visible": qs["visible"], "where": qs["where"],
+            "steer7": {"type": "score", "instructions": ctx + "How far off the nose is the rover, and which way?",
+                       "criteria": STEER7},
+            "range8": {"type": "score", "instructions": ctx + "How far away is the red rover?", "criteria": RANGE8}}
+
+
 def steer_level(b):
     return int(sum(b < e for e in STEER_EDGES))
 
@@ -208,6 +235,58 @@ def score_strips(preds, n=5):
         "mean_strip_prob_visible": np.mean([p["strip_probs"] for p in vis], axis=0).round(3).tolist(),
         "mean_strip_prob_hidden": np.mean([p["strip_probs"] for p in hid], axis=0).round(3).tolist() if hid else None,
     }
+
+
+def evaluate_v2(agent, frames, rows):
+    """probe.questions_v2() on each whole frame: visible, where, steer7, range8."""
+    from PIL import Image
+    qs = questions_v2()
+    out = []
+    for r in rows:
+        img = Image.open(io.BytesIO(frames[r["frame"]])).convert("RGB")
+        a = agent.predict({"image": img}, qs)["answers"]
+        out.append(dict(r, p_visible=float(a["visible"]["noul"]), where=a["where"]["choice"],
+                        steer7_probs=[float(a["steer7"]["probabilities"][str(i)]) for i in range(len(STEER7))],
+                        range8_probs=[float(a["range8"]["probabilities"][str(i)]) for i in range(len(RANGE8))]))
+    return out
+
+
+def score_v2(preds, sharpen=1.0):
+    """Bearing (deg) and range (m) read as the probability-weighted level centre (probabilities
+    raised to `sharpen` first), scored on frames with the rover in view; also within +-34 deg,
+    the span pursuit's turn clip uses."""
+    vis = [p for p in preds if p["visible"]]
+    hid = [p for p in preds if not p["visible"]]
+
+    def ev(ps, centres):
+        q = np.asarray(ps) ** sharpen
+        return float((q / q.sum() * np.asarray(centres)).sum())
+
+    b = np.array([p["bearing_deg"] for p in vis])
+    eb = np.array([ev(p["steer7_probs"], STEER7_CENTRES) for p in vis])
+    rg = np.array([p["range_m"] for p in vis])
+    er = np.array([ev(p["range8_probs"], RANGE8_CENTRES) for p in vis])
+    inr = np.abs(b) <= 34
+    side = np.abs(b) > 7
+    cmd = lambda x: np.clip(1.15 * (x - 3.5) + 1.35, 0, 3.6)  # noqa: E731  run.Guidance's speed law
+    third = lambda x: "left" if bearing_to_x(x) < 1 / 3 else ("right" if bearing_to_x(x) > 2 / 3 else "centre")  # noqa: E731
+    wt = [third(p["bearing_deg"]) if p["visible"] else "not visible" for p in preds]
+    return {"frames": len(preds), "visible_frames": len(vis), "sharpen": sharpen,
+            "visible_auc": _auc([p["p_visible"] for p in vis], [p["p_visible"] for p in hid]),
+            "where_acc": float(np.mean([p["where"] == w for p, w in zip(preds, wt)])),
+            "bearing_mae_deg": float(np.mean(np.abs(eb - b))),
+            "bearing_mae_deg_within34": float(np.mean(np.abs(eb - b)[inr])),
+            "bearing_mae_deg_always_straight": float(np.mean(np.abs(b))),
+            "bearing_side_acc": float(np.mean(np.sign(eb[side]) == np.sign(b[side]))),
+            "bearing_spearman": _spearman(b, eb),
+            "bearing_mean_bias_by_band": {"%d-%d" % (lo, hi): float(np.mean((eb - b)[m] * np.sign(b[m])))
+                                          for lo, hi in ((0, 10), (10, 25), (25, 45), (45, 90))
+                                          for m in [(np.abs(b) >= lo) & (np.abs(b) < hi)] if m.any()},
+            "range_mae_m": float(np.mean(np.abs(er - rg))),
+            "range_mae_m_constant_median": float(np.mean(np.abs(np.median(rg) - rg))),
+            "range_bias_m": float(np.mean(er - rg)),
+            "range_spearman": _spearman(rg, er),
+            "speed_cmd_mae_mps": float(np.mean(np.abs(cmd(er) - cmd(rg))))}
 
 
 def _auc(pos, neg):
