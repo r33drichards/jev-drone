@@ -260,6 +260,9 @@ class TownCourse:
             g.append('    <geom name="%sC" type="sphere" material="leaf" size="%.2f" pos="%.2f %.2f %.2f"/>\n'
                      % (name, cr, x, y, cz))
         g.append(_TAIL)
+        if getattr(self, "appearance", None):     # opt-in real-world look (realism.py); off by default
+            import realism
+            return realism.apply("".join(g), self)
         return "".join(g)
 
     def write(self, directory):
@@ -400,6 +403,9 @@ class LapTracker:
 
 
 def make(name="town", seed=0):
+    if "@" in name:                      # "town@real": realism.py
+        import realism
+        return realism.make(name, seed)
     if name != "town":
         raise KeyError("unknown town course %r (only 'town')" % name)
     return TownCourse(name, seed)

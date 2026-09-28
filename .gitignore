@@ -24,3 +24,6 @@ mujoco_menagerie/
 /*.png
 !docs/*.png
 .course_*.xml
+
+# downloaded real-world assets (Poly Haven, scanned objects, OSM); fetched on demand, not committed
+realism_assets/cache/

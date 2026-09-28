@@ -150,6 +150,9 @@ class Course:
                 g.append(_box("nback%d" % i, x + 7.0, x + 7.4, -s * HALF_W, n1, TALL))
                 g.append(_box("nside%d" % i, x, x + 7.4, n1, n1 + 0.2 * s, TALL))
         g.append(_TAIL)
+        if getattr(self, "appearance", None):     # opt-in real-world look (realism.py); off by default
+            import realism
+            return realism.apply("".join(g), self)
         return "".join(g)
 
     def write(self, directory):
@@ -215,6 +218,9 @@ def render(name, seed=0, directory=".", width=1400, height=320):
     if name.startswith("town"):          # its own map (town.render; flightgif places points with map_px)
         import town
         return town.render(name, seed, directory)
+    if name.startswith("city"):          # its own map too (city.render)
+        import city
+        return city.render(name, seed, directory)
     import io, mujoco
     from PIL import Image, ImageDraw
     c = make(name, seed)
@@ -250,6 +256,12 @@ def render(name, seed=0, directory=".", width=1400, height=320):
 
 
 def make(name, seed=0):
+    if "@" in name:                      # "<course>@<appearance>", e.g. mixed@real: realism.py
+        import realism
+        return realism.make(name, seed)
+    if name.startswith("city"):          # the real city block from OpenStreetMap, city.py
+        import city
+        return city.make(name, seed)
     if name.startswith("town"):          # the looped suburban map, town.py
         import town
         return town.make(name, seed)

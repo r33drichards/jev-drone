@@ -933,27 +933,162 @@ def baseline(configs: str = "no-model,laya-text,laya-image,laya-text-lockstep", 
 
 
 # ---- real drone footage test set (realdata.py): evaluation only, never training ----
-# UAV123 / VisDrone-SOT are research / non-commercial datasets. They are downloaded and converted in
-# these CPU jobs straight onto laya-datasets (/data/realtest/), never onto the local disk.
+# UAV123 / VisDrone-SOT are research / non-commercial datasets. The CPU jobs read the source zips over
+# HTTP range requests and write only the subsampled, resized frames to laya-datasets (/data/realtest/);
+# nothing is downloaded to the local disk. results/realtest/README.md has the terms and the numbers.
+REALTEST_SET = "real-v1"
 real_image = (modal.Image.debian_slim(python_version="3.12").pip_install("requests", "numpy", "pillow")
-              .add_local_file(os.path.join(HERE, "realdata.py"), "/root/realdata.py"))
+              .add_local_file(os.path.join(HERE, "realdata.py"), "/root/realdata.py")
+              .add_local_file(os.path.join(HERE, "probe.py"), "/root/probe.py"))
 
 
-@app.function(image=real_image, cpu=2, memory=8192, timeout=3 * 60 * 60,
-              volumes={"/data": data_vol})
-def realtest_fetch(name: str):
-    """The layout of one realdata.SOURCES zip, read remotely (only its central directory is fetched)."""
+def _real():
     import sys
     sys.path.insert(0, "/root")
     import realdata
-    return json.dumps(realdata.inspect(name))
+    return realdata
+
+
+@app.function(image=real_image, cpu=2, memory=8192, timeout=30 * 60)
+def realtest_fetch(name: str):
+    """The layout of one realdata.SOURCES zip, read remotely (only its central directory is fetched)."""
+    return json.dumps(_real().inspect(name))
+
+
+@app.function(image=real_image, cpu=1, memory=4096, timeout=20 * 60)
+def realtest_uav123_jobs():
+    return _real().uav123_jobs()
+
+
+@app.function(image=real_image, cpu=2, memory=8192, timeout=90 * 60, volumes={"/data": data_vol})
+def realtest_convert(dataset: str, jobs: list, set_name: str = REALTEST_SET):
+    """Convert some sequences onto /data/realtest/<set>/frames; return their label rows (JSON)."""
+    rd = _real()
+    out = "/data/realtest/%s" % set_name
+    rows = (rd.convert_uav123([tuple(j) for j in jobs], out) if dataset == "uav123"
+            else rd.convert_visdrone([tuple(j) for j in jobs], out))
+    data_vol.commit()
+    return json.dumps(rows)
+
+
+@app.function(image=real_image, cpu=1, memory=4096, timeout=10 * 60, volumes={"/data": data_vol})
+def realtest_finalize(rows_json: str, meta: dict, set_name: str = REALTEST_SET):
+    data_vol.reload()
+    d = "/data/realtest/%s" % set_name
+    rows = json.loads(rows_json)
+    with open(os.path.join(d, "labels.jsonl"), "w") as f:
+        for r in rows:
+            f.write(json.dumps(r) + "\n")
+    json.dump(meta, open(os.path.join(d, "meta.json"), "w"), indent=1)
+    data_vol.commit()
+    return len(rows), len(os.listdir(os.path.join(d, "frames")))
 
 
 @app.local_entrypoint()
 def realtest_inspect(names: str = "uav123_10fps,visdrone_sot"):
-    """Fetch each source (in parallel) and print its zip layout."""
+    """Print each source zip's layout (read remotely)."""
     ns = names.split(",")
     for n, fc in zip(ns, [realtest_fetch.spawn(n) for n in ns]):
         r = _get(fc)
         print("=====", n)
         print(r if isinstance(r, Exception) else json.dumps(json.loads(r), indent=0)[:12000], flush=True)
+
+
+@app.local_entrypoint()
+def realtest_build(set_name: str = REALTEST_SET, chunk: int = 6):
+    """Build /data/realtest/<set>/ (labels.jsonl, frames/, meta.json) from UAV123 car / person / truck /
+    bike and the labelled VisDrone-SOT val + test-dev sequences, in parallel CPU jobs."""
+    import realdata
+    uav = realtest_uav123_jobs.remote()
+    vd = [(sp, s) for sp, d in realdata.VISDRONE_CLASS.items() for s in sorted(d)]
+    tasks = [("uav123", uav[i:i + chunk]) for i in range(0, len(uav), chunk)]
+    tasks += [("visdrone", vd[i:i + chunk]) for i in range(0, len(vd), chunk)]
+    print(len(uav), "UAV123 sub-sequences,", len(vd), "VisDrone sequences,", len(tasks), "jobs", flush=True)
+    rows = []
+    for (ds, js), fc in zip(tasks, [realtest_convert.spawn(ds, js, set_name) for ds, js in tasks]):
+        r = _get(fc)
+        if isinstance(r, Exception):
+            print("FAILED", ds, js, repr(r)[:400], flush=True)
+            continue
+        rows += json.loads(r)
+        print(ds, [j[0] if ds == "uav123" else j[1] for j in js], "->", len(rows), "rows", flush=True)
+    meta = {"hfov_deg_assumed": realdata.HFOV_DEG, "long_side": realdata.LONG_SIDE, "crop_h": realdata.CROP_H,
+            "uav123_every": 6, "visdrone_every": 30, "cap_per_seq": 24, "uav123_jobs": uav, "visdrone": vd,
+            "sources": {k: v["url"] for k, v in realdata.SOURCES.items()}}
+    print("rows, frames on the volume:", realtest_finalize.remote(json.dumps(rows), meta, set_name))
+
+
+@app.function(gpu="L4", cpu=4, memory=16384, timeout=4 * 60 * 60,
+              volumes={"/cache/hf": hf_vol, "/ckpt": ckpt_vol.read_only(), "/data": data_vol.read_only()})
+def realtest_probe(model: str = "", set_name: str = REALTEST_SET, limit: int = 0):
+    """Ask one checkpoint realdata.questions_real (as trained, and naming the real target) on every frame
+    of /data/realtest/<set>; returns (preds, summary) as JSON text."""
+    _enter()
+    import laya, realdata
+    d = "/data/realtest/%s" % set_name
+    rows = [json.loads(l) for l in open(os.path.join(d, "labels.jsonl"))]
+    if limit:
+        rows = rows[::max(1, len(rows) // limit)][:limit]
+    agent = laya.load_vlm(model or "thaitea/laya-vision", option_max_len=256, head_max_len=1024, max_len=3072)
+    t0 = time.time()
+    preds = realdata.evaluate_real(agent, os.path.join(d, "frames"), rows)
+    summary = realdata.score_groups(preds)
+    summary["_meta"] = {"model": model or "thaitea/laya-vision", "set": set_name, "rows": len(rows),
+                        "seconds": round(time.time() - t0, 1)}
+    return json.dumps(preds, default=float), json.dumps(summary, default=float)
+
+
+def _run_tag(model):
+    return model.strip("/").replace("/ckpt/smolvlm/", "").replace("/", "_") if model else "zero-shot"
+
+
+@app.local_entrypoint()
+def realtest_score(models: str = ",/ckpt/smolvlm/drone-rover-v2/last,/ckpt/smolvlm/drone-rover-v3.1/best",
+                   set_name: str = REALTEST_SET, limit: int = 0, preds_dir: str = ""):
+    """One L4 job per checkpoint ('' = zero-shot thaitea/laya-vision). Summaries ->
+    results/realtest/<run>/summary.json. Per-frame predictions carry the datasets' boxes, so they go
+    to --preds-dir (default: not saved), never into the repo."""
+    ms = models.split(",")
+    calls = [realtest_probe.spawn(m, set_name, limit) for m in ms]
+    for m, fc in zip(ms, calls):
+        r = _get(fc)
+        if isinstance(r, Exception):
+            print("FAILED", m or "zero-shot", repr(r)[:600], flush=True)
+            continue
+        preds, summary = r
+        d = os.path.join(HERE, "results", "realtest", _run_tag(m) + ("-limit%d" % limit if limit else ""))
+        os.makedirs(d, exist_ok=True)
+        open(os.path.join(d, "summary.json"), "w").write(json.dumps(json.loads(summary), indent=1))
+        if preds_dir:
+            os.makedirs(preds_dir, exist_ok=True)
+            open(os.path.join(preds_dir, _run_tag(m) + ".json"), "w").write(preds)
+        a = json.loads(summary)
+        for w in ("rover", "target"):
+            x = a[w]["all"]
+            print("%-28s %-6s auc=%.3f where=%.3f(maj %.3f) side=%.3f rho_steer=%.3f rho_range=%.3f" % (
+                _run_tag(m), w, x["visible_auc"] or 0, x["where_acc"], x["where_majority_baseline"],
+                x["steer_side_acc"] or 0, x["steer_spearman_vs_offset"] or 0, x["range_spearman_vs_box"] or 0),
+                flush=True)
+
+
+@app.function(image=real_image, cpu=1, memory=4096, timeout=10 * 60, volumes={"/data": data_vol.read_only()})
+def realtest_draw(items_json: str, set_name: str = REALTEST_SET):
+    rd = _real()
+    return [rd.draw_sample("/data/realtest/%s/frames" % set_name, row, ans) for row, ans in json.loads(items_json)]
+
+
+@app.local_entrypoint()
+def realtest_samples(preds_dir: str, frames: str, wording: str = "target", set_name: str = REALTEST_SET,
+                     out: str = "results/realtest/samples"):
+    """Draw the listed frames (comma-separated names) with each checkpoint's answers (from
+    realtest_score --preds-dir) to small PNGs."""
+    runs = [("zero-shot", "zero-shot"), ("v2 last", "drone-rover-v2_last"), ("v3.1 best", "drone-rover-v3.1_best")]
+    preds = {tag: {p["frame"]: p for p in json.load(open(os.path.join(preds_dir, tag + ".json")))
+                   if p["wording"] == wording} for _, tag in runs}
+    names = frames.split(",")
+    items = [(preds[runs[0][1]][n], [(lab, preds[tag][n]) for lab, tag in runs]) for n in names]
+    os.makedirs(os.path.join(HERE, out), exist_ok=True)
+    for n, png in zip(names, realtest_draw.remote(json.dumps(items), set_name)):
+        path = os.path.join(HERE, out, n.rsplit(".", 1)[0] + ".png")
+        open(path, "wb").write(png)
+        print("wrote", path, len(png) // 1024, "KB")
