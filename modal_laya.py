@@ -122,6 +122,12 @@ CONFIGS = {
            ("laya-tactics-v3-argmax", "laya-v3", {"pursuit": "code", "tactics_kw": {"climb_p": None}}, False))},
     # CPU controls: the reacquisition logic on the simulator's own v3 label (laya_pursuit.SimReappear), with
     # code pursuit and with the sim stand-in for laya-pursuit; compare with code-pursuit-oracle / sim-pursuit
+    # hybrid: drone-rover-v2 flies the pursuit (v3.1 steers worse in flight: 13/24 vs 21/24 on seeds 0-11),
+    # the --model checkpoint (v3.1) answers the reacquisition questions; oracle tactics (v3.1's climb answer
+    # cannot separate beams from pocket walls: no P(climb) threshold gives both recall and precision)
+    "hybrid-v2pursuit-reacq": (True, "const:oracle", False, False,
+                               {"pursuit": "laya-pursuit", "pursuit_questions": "v2", "reacquire": "laya",
+                                "pursuit_model": "/ckpt/smolvlm/drone-rover-v2/last"}),
     "code-pursuit-simreacq": (True, "const:oracle", False, False, {"pursuit": "code", "reacquire": "sim"}),
     "sim-pursuit-simreacq": (True, "const:oracle", False, False,
                              {"pursuit": "sim-pursuit", "pursuit_noise_deg": 4.0, "pursuit_delay_s": 0.1,
@@ -175,9 +181,14 @@ def fly(config: str, seed: int, seconds: float, model: str = "", course: str = "
     import run
     use_model, backend, img, lockstep, pk = _config(config)
     t0 = time.time()
+    pk = dict(pk)
+    # a config may name its own pursuit checkpoint ("pursuit_model"); --model then serves tactics and
+    # reacquisition (hybrid: v2 flies the pursuit, v3.1 answers where a lost rover will reappear)
+    pm = pk.pop("pursuit_model", None)
+    extra = {"reacquire_model": model or None} if pm and pk.get("reacquire") == "laya" else {}
     r = run.episode(seed, seconds, use_jev=use_model, backend=backend, laya_model=model or None,
                     laya_image=img, lockstep=lockstep, course=course, budget=budget or None,
-                    pursuit_model=model or None, **pk)
+                    pursuit_model=pm or model or None, **extra, **pk)
     r.update(config=config, wall_s=round(time.time() - t0, 1))
     try:
         import torch
