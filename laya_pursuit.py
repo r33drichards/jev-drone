@@ -71,6 +71,18 @@ class _Laya:
         self.agent = laya.load_vlm(model or LAYA_MODEL, device=device, revision=revision, **LAYA_BUDGETS)
         self.threshold = threshold
         self.delay_s = 0.0                # real latency is wall-clock, measured by the Locator
+        self.warmup_s = None
+
+    def warm_up(self):
+        """Two throwaway predicts before the flight starts. The first call on a GPU pays for CUDA
+        setup and kernel selection (seconds); made inside a real-time flight it left the aircraft
+        with no heading for its opening seconds, flying 'target lost' straight past the rover."""
+        import time
+        blank = np.zeros((384, 512, 3), dtype=np.uint8)
+        t0 = time.time()
+        self.locate(blank)
+        self.warmup_s = round(time.time() - t0, 2)
+        self.locate(blank)
 
     @staticmethod
     def _img(frame):
@@ -88,6 +100,7 @@ class StripsBackend(_Laya):
         self.sharpen = sharpen
         self.model = "laya-strips:" + (model or "default")
         self.centres = (np.arange(N_STRIPS) + 0.5) / N_STRIPS
+        self.warm_up()
 
     def locate(self, frame, truth=None):
         q = {"rover": probe.STRIP_Q}
@@ -102,21 +115,31 @@ class StripsBackend(_Laya):
 
 
 class FrameBackend(_Laya):
-    """One predict on the whole frame: visible (noul) and steer (score over 5 levels)."""
+    """One predict on the whole frame: visible (noul) and steer (score over 5 levels).
 
-    def __init__(self, model=None, threshold=0.5, **kw):
+    The steer score's expected level compresses toward the centre: the calibrated temperature
+    flattens the levels, and the outer centres sit at +-27 deg. Read raw, a rover 12-25 deg off
+    the nose came out ~8 deg too central, so pursuit under-turned and lost it. `sharpen` raises the
+    level probabilities to that power and renormalises; `gain` rescales the result. The defaults
+    (2, 1.16) were fitted on held-out mixed frames within +-34 deg (pursuit's turn clip) and
+    scored on the unseen no-climb layout: 4.5 deg mean error there, against 6.3 read raw
+    (results/probe/README.md)."""
+
+    def __init__(self, model=None, threshold=0.5, sharpen=2.0, gain=1.16, **kw):
         super().__init__(model, threshold, **kw)
+        self.sharpen, self.gain = sharpen, gain
         self.model = "laya-frame:" + (model or "default")
         qs = probe.questions()
         self.qs = {"visible": qs["visible"], "steer": qs["steer"]}
+        self.warm_up()
 
     def locate(self, frame, truth=None):
         a = self.agent.predict({"image": self._img(frame)}, self.qs)["answers"]
         pv = float(a["visible"]["noul"])
         if pv < self.threshold:
             return False, None, pv
-        # expected level (0 = hard left) -> bearing; the centres are evenly spaced, so this is linear
-        return True, float(np.interp(float(a["steer"]["score"]), range(len(STEER_CENTRES)), STEER_CENTRES)), pv
+        p = np.array([float(a["steer"]["probabilities"][str(i)]) for i in range(len(STEER_CENTRES))]) ** self.sharpen
+        return True, self.gain * float((p / p.sum() * np.array(STEER_CENTRES)).sum()), pv
 
 
 def make_locator_backend(mode, model=None, threshold=0.5, noise_deg=0.0, delay_s=0.0, seed=0):
@@ -252,4 +275,5 @@ class Locator:
                 "bearing_mae_deg": r(np.mean(self.err), 2) if self.err else None, "bearing_n": len(self.err),
                 "code_bearing_mae_deg": r(np.mean(self.ref_err), 2) if self.ref_err else None,
                 "visible_acc": r(np.mean(self.vis_ok)) if self.vis_ok else None,
-                "false_visible": int(self.false_visible), "missed_visible": int(self.missed_visible)}
+                "false_visible": int(self.false_visible), "missed_visible": int(self.missed_visible),
+                "warmup_s": getattr(self.backend, "warmup_s", None)}

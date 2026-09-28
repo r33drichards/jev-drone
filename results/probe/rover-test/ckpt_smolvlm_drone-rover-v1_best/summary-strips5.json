@@ -1,0 +1,46 @@
+{
+ "frames": 1368,
+ "visible_frames": 884,
+ "strips": 5,
+ "crop_detection_auc": 0.9916819306893083,
+ "crop_p_yes_rover_mean": 0.9654236425339368,
+ "crop_p_yes_empty_mean": 0.06040515446608462,
+ "visible_auc_max_strip": 0.9956176844545829,
+ "strip_acc_argmax": 0.9355203619909502,
+ "strip_majority_baseline": 0.583710407239819,
+ "strip_within_one": 1.0,
+ "side_acc_argmax": 1.0,
+ "side_acc_weighted": 0.8597285067873304,
+ "side_n": 663,
+ "spearman_x": 0.8920652451565939,
+ "bearing_mae_deg_weighted": 5.823467114717662,
+ "bearing_mae_deg_always_straight": 20.542425998637796,
+ "true_strip_counts": [
+  38,
+  138,
+  516,
+  166,
+  26
+ ],
+ "pred_strip_counts": [
+  21,
+  137,
+  528,
+  172,
+  26
+ ],
+ "mean_strip_prob_visible": [
+  0.066,
+  0.218,
+  0.664,
+  0.256,
+  0.059
+ ],
+ "mean_strip_prob_hidden": [
+  0.021,
+  0.031,
+  0.087,
+  0.039,
+  0.022
+ ]
+}

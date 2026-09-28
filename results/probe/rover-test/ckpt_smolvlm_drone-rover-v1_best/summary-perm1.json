@@ -1,0 +1,34 @@
+{
+ "frames": 1368,
+ "visible_frames": 884,
+ "visible_auc": 0.9926961407576381,
+ "where_acc": 0.9400584795321637,
+ "where_majority_baseline": 0.48391812865497075,
+ "where_answer_counts": {
+  "left": 91,
+  "centre": 722,
+  "right": 83,
+  "not visible": 472
+ },
+ "steer_acc": 0.8054298642533937,
+ "steer_majority_baseline": 0.25,
+ "steer_spearman_vs_bearing": 0.967512654996071,
+ "steer_side_acc": 0.9819004524886877,
+ "steer_side_n": 663,
+ "speed_acc": 0.8178733031674208,
+ "speed_majority_baseline": 0.5927601809954751,
+ "speed_spearman_vs_range": 0.8080611897211927,
+ "mean_steer_probs": [
+  0.201,
+  0.177,
+  0.248,
+  0.185,
+  0.189
+ ],
+ "mean_speed_probs": [
+  0.044,
+  0.605,
+  0.291,
+  0.061
+ ]
+}
