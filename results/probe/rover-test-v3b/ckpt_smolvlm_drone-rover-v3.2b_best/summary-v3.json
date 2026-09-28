@@ -1,0 +1,129 @@
+{
+ "frames": 3891,
+ "lost_frames": 2923,
+ "occluded_auc_lost": 0.9417307628275564,
+ "occluded_auc_all": 0.9555802305434427,
+ "occluded_true_lost": 1278,
+ "occluded_acc_lost": 0.8587068080738967,
+ "occluded_majority_lost": 0.562777967841259,
+ "reappear_lost": {
+  "n": 2923,
+  "acc": 0.6722545330140267,
+  "majority_baseline": 0.36195689360246325,
+  "truth_counts": {
+   "left": 606,
+   "ahead": 657,
+   "right": 602,
+   "behind": 1058
+  },
+  "confusion": {
+   "left": {
+    "left": 302,
+    "ahead": 58,
+    "right": 74,
+    "behind": 172
+   },
+   "ahead": {
+    "left": 60,
+    "ahead": 467,
+    "right": 110,
+    "behind": 20
+   },
+   "right": {
+    "left": 32,
+    "ahead": 42,
+    "right": 391,
+    "behind": 137
+   },
+   "behind": {
+    "left": 108,
+    "ahead": 19,
+    "right": 126,
+    "behind": 805
+   }
+  }
+ },
+ "reappear_visible": {
+  "n": 968,
+  "acc": 0.7778925619834711,
+  "majority_baseline": 0.3481404958677686,
+  "truth_counts": {
+   "left": 309,
+   "ahead": 337,
+   "right": 305,
+   "behind": 17
+  },
+  "confusion": {
+   "left": {
+    "left": 252,
+    "ahead": 46,
+    "right": 11,
+    "behind": 0
+   },
+   "ahead": {
+    "left": 46,
+    "ahead": 237,
+    "right": 54,
+    "behind": 0
+   },
+   "right": {
+    "left": 9,
+    "ahead": 29,
+    "right": 264,
+    "behind": 3
+   },
+   "behind": {
+    "left": 8,
+    "ahead": 0,
+    "right": 9,
+    "behind": 0
+   }
+  }
+ },
+ "reappear_eta": {
+  "n": 2923,
+  "acc": 0.7974683544303798,
+  "majority_baseline": 0.5165925419089976,
+  "within_one": 0.8717071501881628,
+  "spearman_expected_vs_true_s": 0.6314481280474452,
+  "mae_s_capped15": 3.176128494346055,
+  "truth_counts": [
+   1510,
+   266,
+   449,
+   698
+  ],
+  "pred_counts": [
+   1648,
+   261,
+   410,
+   604
+  ]
+ },
+ "maneuver": {
+  "n": 1839,
+  "acc": 0.9668297988036977,
+  "majority_baseline": 0.9646547036432844,
+  "climb_recall": 0.07692307692307693,
+  "climb_precision": 0.8333333333333334,
+  "climb_auc": 0.7783843552163733,
+  "confusion": {
+   "hold_course": {
+    "hold_course": 1773,
+    "gap_left": 0,
+    "gap_right": 0,
+    "climb": 1,
+    "brake": 0,
+    "reacquire": 0
+   },
+   "climb": {
+    "hold_course": 60,
+    "gap_left": 0,
+    "gap_right": 0,
+    "climb": 5,
+    "brake": 0,
+    "reacquire": 0
+   }
+  }
+ }
+}

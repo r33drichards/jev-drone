@@ -1,0 +1,129 @@
+{
+ "frames": 3891,
+ "lost_frames": 2923,
+ "occluded_auc_lost": 0.9715308398856496,
+ "occluded_auc_all": 0.97095493400938,
+ "occluded_true_lost": 1278,
+ "occluded_acc_lost": 0.9089976052001368,
+ "occluded_majority_lost": 0.562777967841259,
+ "reappear_lost": {
+  "n": 2923,
+  "acc": 0.7256243585357509,
+  "majority_baseline": 0.36195689360246325,
+  "truth_counts": {
+   "left": 606,
+   "ahead": 657,
+   "right": 602,
+   "behind": 1058
+  },
+  "confusion": {
+   "left": {
+    "left": 391,
+    "ahead": 40,
+    "right": 37,
+    "behind": 138
+   },
+   "ahead": {
+    "left": 75,
+    "ahead": 506,
+    "right": 62,
+    "behind": 14
+   },
+   "right": {
+    "left": 72,
+    "ahead": 32,
+    "right": 410,
+    "behind": 88
+   },
+   "behind": {
+    "left": 151,
+    "ahead": 10,
+    "right": 83,
+    "behind": 814
+   }
+  }
+ },
+ "reappear_visible": {
+  "n": 968,
+  "acc": 0.8057851239669421,
+  "majority_baseline": 0.3481404958677686,
+  "truth_counts": {
+   "left": 309,
+   "ahead": 337,
+   "right": 305,
+   "behind": 17
+  },
+  "confusion": {
+   "left": {
+    "left": 268,
+    "ahead": 35,
+    "right": 6,
+    "behind": 0
+   },
+   "ahead": {
+    "left": 50,
+    "ahead": 245,
+    "right": 42,
+    "behind": 0
+   },
+   "right": {
+    "left": 8,
+    "ahead": 31,
+    "right": 266,
+    "behind": 0
+   },
+   "behind": {
+    "left": 7,
+    "ahead": 0,
+    "right": 9,
+    "behind": 1
+   }
+  }
+ },
+ "reappear_eta": {
+  "n": 2923,
+  "acc": 0.8392062949024974,
+  "majority_baseline": 0.5165925419089976,
+  "within_one": 0.9045501197399931,
+  "spearman_expected_vs_true_s": 0.7093681173038904,
+  "mae_s_capped15": 2.5494981640509398,
+  "truth_counts": [
+   1510,
+   266,
+   449,
+   698
+  ],
+  "pred_counts": [
+   1715,
+   273,
+   348,
+   587
+  ]
+ },
+ "maneuver": {
+  "n": 1839,
+  "acc": 0.9711799891245242,
+  "majority_baseline": 0.9646547036432844,
+  "climb_recall": 0.18461538461538463,
+  "climb_precision": 1.0,
+  "climb_auc": 0.935842511490764,
+  "confusion": {
+   "hold_course": {
+    "hold_course": 1774,
+    "gap_left": 0,
+    "gap_right": 0,
+    "climb": 0,
+    "brake": 0,
+    "reacquire": 0
+   },
+   "climb": {
+    "hold_course": 53,
+    "gap_left": 0,
+    "gap_right": 0,
+    "climb": 12,
+    "brake": 0,
+    "reacquire": 0
+   }
+  }
+ }
+}

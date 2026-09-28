@@ -240,11 +240,17 @@ class LayaV3Backend:
     there). The loaded agent is tactics.shared_laya's, so a laya pursuit locator on the same checkpoint
     reuses it. Warmed up at construction, like the locator, so the flight's first call is not the slow one.
 
-    `climb_p`: answer climb whenever P(climb) >= climb_p, else the argmax (V3_CLIMB_P; None = argmax only)."""
+    `climb_p`: answer climb whenever P(climb) >= climb_p, else the argmax (V3_CLIMB_P; None = argmax only).
+    `climb_votes`: only once P(climb) >= climb_p on that many calls in a row. One call is not enough: a climb
+    commits Guidance for commit_steps, and over a pocket's low front wall that flies the aircraft into the
+    pocket. drone-rover-v3.2a at 0.1543 crossed the threshold at least once in 14 of 21 pocket visits of the
+    rover-test-tac probe flights, and flights stalled in the first pocket (8/16 on mixed with code pursuit);
+    3 in a row at 0.12, at the flight's ~1.5 calls/s, fires in 1-2 of 21 pocket visits and 16 of 17 beams."""
     sees_images = True
     wants_context = True
 
-    def __init__(self, model=None, device=None, revision=None, with_scene=False, climb_p=V3_CLIMB_P, **_ignored):
+    def __init__(self, model=None, device=None, revision=None, with_scene=False, climb_p=V3_CLIMB_P,
+                 climb_votes=1, **_ignored):
         import probe
         self.agent = shared_laya(model, device, revision)
         self.model = "laya-v3:" + (model or "default") + ("+scene" if with_scene else "")
@@ -252,11 +258,16 @@ class LayaV3Backend:
         self.climb_p = None if climb_p is None else float(climb_p)
         if self.climb_p is not None:
             self.model += ":climb_p=%g" % self.climb_p
+        self.climb_votes = max(1, int(climb_votes))
+        if self.climb_votes > 1:
+            self.model += ":votes=%d" % self.climb_votes
+        self.over = 0                       # consecutive calls with P(climb) >= climb_p
         self.n_climb_threshold = 0          # calls where the threshold, not the argmax, chose climb
         self.qs = {"maneuver": probe.questions_v3()["maneuver"]}
         self.truncated = 0
         self.warmup_s = None
         self.warm_up()
+        self.over = 0
 
     def warm_up(self):
         import numpy as np
@@ -278,9 +289,13 @@ class LayaV3Backend:
             self.truncated += 1
         probs = {k: float(v) for k, v in a["probabilities"].items()}
         mv = a["choice"]
-        if self.climb_p is not None and mv != "climb" and probs.get("climb", 0.0) >= self.climb_p:
-            mv = "climb"
-            self.n_climb_threshold += 1
+        if self.climb_p is not None:
+            self.over = self.over + 1 if probs.get("climb", 0.0) >= self.climb_p else 0
+            if mv == "climb" and self.over < self.climb_votes:
+                mv = max((k for k in probs if k != "climb"), key=probs.get)
+            elif mv != "climb" and self.over >= self.climb_votes:
+                mv = "climb"
+                self.n_climb_threshold += 1
         return {
             "maneuver": mv,
             "confidence": round(float(probs.get(mv, a["confidence"])), 3),

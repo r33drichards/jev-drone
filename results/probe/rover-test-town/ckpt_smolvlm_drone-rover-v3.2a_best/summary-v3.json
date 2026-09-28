@@ -1,0 +1,121 @@
+{
+ "frames": 4541,
+ "lost_frames": 1186,
+ "occluded_auc_lost": 0.67114644328779,
+ "occluded_auc_all": 0.9028912020550411,
+ "occluded_true_lost": 232,
+ "occluded_acc_lost": 0.7967959527824621,
+ "occluded_majority_lost": 0.8043844856661045,
+ "reappear_lost": {
+  "n": 1186,
+  "acc": 0.49325463743676223,
+  "majority_baseline": 0.5337268128161888,
+  "truth_counts": {
+   "left": 271,
+   "ahead": 101,
+   "right": 181,
+   "behind": 633
+  },
+  "confusion": {
+   "left": {
+    "left": 124,
+    "ahead": 3,
+    "right": 35,
+    "behind": 109
+   },
+   "ahead": {
+    "left": 57,
+    "ahead": 4,
+    "right": 15,
+    "behind": 25
+   },
+   "right": {
+    "left": 56,
+    "ahead": 1,
+    "right": 66,
+    "behind": 58
+   },
+   "behind": {
+    "left": 133,
+    "ahead": 13,
+    "right": 96,
+    "behind": 391
+   }
+  }
+ },
+ "reappear_visible": {
+  "n": 3355,
+  "acc": 0.7761549925484351,
+  "majority_baseline": 0.4834575260804769,
+  "truth_counts": {
+   "left": 835,
+   "ahead": 1622,
+   "right": 894,
+   "behind": 4
+  },
+  "confusion": {
+   "left": {
+    "left": 686,
+    "ahead": 137,
+    "right": 12,
+    "behind": 0
+   },
+   "ahead": {
+    "left": 213,
+    "ahead": 1150,
+    "right": 259,
+    "behind": 0
+   },
+   "right": {
+    "left": 2,
+    "ahead": 124,
+    "right": 768,
+    "behind": 0
+   },
+   "behind": {
+    "left": 3,
+    "ahead": 0,
+    "right": 1,
+    "behind": 0
+   }
+  }
+ },
+ "reappear_eta": {
+  "n": 1186,
+  "acc": 0.7268128161888702,
+  "majority_baseline": 0.7327150084317032,
+  "within_one": 0.7352445193929174,
+  "spearman_expected_vs_true_s": 0.16098023591792807,
+  "mae_s_capped15": 4.668706549504521,
+  "truth_counts": [
+   869,
+   5,
+   0,
+   312
+  ],
+  "pred_counts": [
+   1112,
+   14,
+   2,
+   58
+  ]
+ },
+ "maneuver": {
+  "n": 1165,
+  "acc": 1.0,
+  "majority_baseline": 1.0,
+  "climb_recall": null,
+  "climb_precision": null,
+  "climb_auc": null,
+  "confusion": {
+   "hold_course": {
+    "hold_course": 1165,
+    "gap_left": 0,
+    "gap_right": 0,
+    "climb": 0,
+    "brake": 0,
+    "reacquire": 0
+   }
+  }
+ }
+}

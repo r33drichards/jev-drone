@@ -44,6 +44,11 @@ ROVER_SET = "drone_rover"
 # for one GPU per flight (~40 at once); capped, it queues and takes a few times longer
 GPU_MAX = int(os.environ.get("JEV_GPU_MAX", "10"))          # /data/vqa/drone_rover on laya-datasets, for laya-vision's finetune_long
 
+# drone-rover-v3.2a pursuit read-out (readout.py on its rover-test preds-v2.jsonl)
+_V32_PURSUIT = {"pursuit": "laya-pursuit", "pursuit_questions": "v2", "pursuit_sharpen": 1.5,
+                "pursuit_range": {"range_sharpen": 1.5}}
+_V32_VOTE = {"climb_p": 0.12, "climb_votes": 3}
+
 # name -> (use the model?, backend, laya sees the camera frame, lockstep[, pursuit kwargs for run.episode])
 CONFIGS = {
     "no-model": (False, "laya", False, False),   # the ablation: greedy heuristic, never consults a model
@@ -128,6 +133,19 @@ CONFIGS = {
     "hybrid-v2pursuit-reacq": (True, "const:oracle", False, False,
                                {"pursuit": "laya-pursuit", "pursuit_questions": "v2", "reacquire": "laya",
                                 "pursuit_model": "/ckpt/smolvlm/drone-rover-v2/last"}),
+    # drone-rover-v3.2a (pass --model /ckpt/smolvlm/drone-rover-v3.2a/best), one checkpoint for everything:
+    # read-out fitted by readout.py (steer and range power 1.5), climb when P(climb) >= 0.1543, the
+    # rover-test-tac probe's best threshold (beam recall 78%, false climbs at pocket walls 4.8% of frames;
+    # v3.1 managed 29% precision at its best threshold). -oracle: oracle tactics; tactics-: code pursuit.
+    **{name: (True, backend, backend == "laya-v3", False, pk)
+       for name, backend, pk in (
+           ("laya-full-v3.2", "laya-v3", dict(_V32_PURSUIT, reacquire="laya", tactics_kw={"climb_p": 0.1543})),
+           ("laya-pursuit-v3.2-reacq", "const:oracle", dict(_V32_PURSUIT, reacquire="laya")),
+           ("laya-tactics-v3.2", "laya-v3", {"pursuit": "code", "tactics_kw": {"climb_p": 0.1543}}),
+           # -vote: climb only after 3 calls in a row at P(climb) >= 0.12 (tactics.LayaV3Backend climb_votes);
+           # one call over 0.1543 flew the aircraft into the first pocket in half the mixed flights
+           ("laya-full-v3.2-vote", "laya-v3", dict(_V32_PURSUIT, reacquire="laya", tactics_kw=_V32_VOTE)),
+           ("laya-tactics-v3.2-vote", "laya-v3", {"pursuit": "code", "tactics_kw": _V32_VOTE}))},
     "code-pursuit-simreacq": (True, "const:oracle", False, False, {"pursuit": "code", "reacquire": "sim"}),
     "sim-pursuit-simreacq": (True, "const:oracle", False, False,
                              {"pursuit": "sim-pursuit", "pursuit_noise_deg": 4.0, "pursuit_delay_s": 0.1,
