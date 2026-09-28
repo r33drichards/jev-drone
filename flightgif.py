@@ -11,6 +11,7 @@ from PIL import Image, ImageDraw
 
 CHASE_W, CHASE_H = 480, 360
 PANEL_W = 256
+TAN_H = float(np.tan(np.deg2rad(55.0)) * 96 / 72)   # probe.TAN_H: the onboard camera's half-width
 
 
 def _font():
@@ -19,6 +20,28 @@ def _font():
         return ImageFont.load_default(size=13)
     except Exception:
         return None
+
+
+def _bearing_x(b):
+    """Pixel column on the camera panel for a bearing (+ left), with probe.py's TAN_H."""
+    x = 0.5 - np.tan(np.deg2rad(np.clip(b, -80, 80))) / (2 * TAN_H)
+    return CHASE_W + float(np.clip(x, 0, 1)) * (PANEL_W - 1)
+
+
+def _wrap(a):
+    return (a + np.pi) % (2 * np.pi) - np.pi
+
+
+def _laya_line(loc, truly, tb, disagree):
+    """'Laya: rover at +12 deg (true +10)' / 'Laya: not visible (truly visible)', red when the
+    visibility disagrees with the segmentation truth."""
+    if loc["visible"]:
+        txt = "Laya: rover at %+.0f\u00b0" % loc["bearing_deg"]
+        txt += " (true %+.0f\u00b0)" % tb if truly else " (truly NOT visible)"
+    else:
+        txt = "Laya: not visible" + (" (truly visible %+.0f\u00b0)" % tb if truly else " (truly not)")
+    col = (255, 80, 80) if disagree else ((255, 220, 60) if loc["visible"] else (170, 170, 170))
+    return txt, col
 
 
 def make_gif(record, course, seed, title, directory=".", every=2, frame_ms=100, trim_after_s=8.0):
@@ -71,9 +94,23 @@ def make_gif(record, course, seed, title, directory=".", every=2, frame_ms=100, 
         canvas = Image.new("RGB", (map_w, CHASE_H + map_h), (18, 20, 24))
         canvas.paste(chase, (0, 0))
         dr = ImageDraw.Draw(canvas)
+        loc = snap.get("loc")
+        truly = snap["target_visible"]
+        tb = snap.get("true_bearing_deg")
+        disagree = loc is not None and bool(loc["visible"]) != bool(truly)
+        eh = PANEL_W * 3 // 4
         if snap["rgb"] is not None:
-            eye = Image.fromarray(snap["rgb"]).resize((PANEL_W, PANEL_W * 3 // 4))
+            eye = Image.fromarray(snap["rgb"]).resize((PANEL_W, eh))
             canvas.paste(eye, (CHASE_W, 0))
+            # ticks on the camera frame: true bearing (green, top) and Laya's (yellow, bottom)
+            if truly and tb is not None:
+                u = _bearing_x(tb)
+                dr.line([(u, 0), (u, eh // 3)], fill=(90, 255, 90), width=2)
+            if loc is not None and loc["visible"] and loc.get("bearing_deg") is not None:
+                u = _bearing_x(loc["bearing_deg"])
+                dr.line([(u, 2 * eh // 3), (u, eh - 1)], fill=(255, 220, 60), width=2)
+            if disagree:
+                dr.rectangle([CHASE_W, 0, CHASE_W + PANEL_W - 1, eh - 1], outline=(255, 60, 60), width=4)
             dr.text((CHASE_W + 6, 4), "what Laya sees", fill=(255, 255, 255), font=font)
         j = snap["judg"]
         live = j.get("source") in ("jev", "laya") and (j.get("age_s") or 9) < 1.5
@@ -89,6 +126,21 @@ def make_gif(record, course, seed, title, directory=".", every=2, frame_ms=100, 
              (140, 230, 140) if snap["target_visible"] else (230, 140, 140)),
             ("collisions: %d" % snap["hits"], (200, 200, 200)),
         ]
+        if loc is not None:
+            flags = " ".join(f for f, on in (("CLIMBING", snap["climbing"]), ("REFLEX", snap["reflex"])) if on)
+            lines[4:6] = [(flags, (255, 150, 110)), _laya_line(loc, truly, tb, disagree)]
+            g = snap.get("guide") or {}
+            if (g.get("lost_for") or 0) > 1.2:
+                # "branch" is recorded from this version on; older recordings only know lost_for
+                br = g.get("branch", "?")
+                searching = br == "baseline" or (br == "tactical" and (j.get("target_truly_lost") or 0) >= 0.5)   # tactics.THRESHOLDS["really_lost"]
+                lines.append(("%s  lost %.1fs  head %+.0f" % (
+                    "SEARCH" if searching else "lost, holding course" if br == "tactical" else "lost",
+                    g["lost_for"], np.rad2deg(_wrap((g.get("yaw_sp") or snap["yaw"]) - snap["yaw"]))),
+                    (255, 170, 255) if searching else (230, 140, 140)))
+            else:
+                lines.append(("  age %.2fs  p(vis) %.2f" % (loc.get("age_s") or 0, loc.get("p_visible") or 0)
+                              if loc.get("age_s") is not None else "", (170, 170, 170)))
         for n, (txt, col) in enumerate(lines):
             if txt:
                 dr.text((CHASE_W + 8, y0 + 18 * n), txt, fill=col, font=font)
