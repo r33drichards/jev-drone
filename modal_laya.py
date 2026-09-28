@@ -79,6 +79,23 @@ CONFIGS = {
        for name, pk in (("code-pursuit", {"pursuit": "code"}), ("laya-steer-frame", {"pursuit": "laya-frame"}),
                         ("sim-steer-noisy", {"pursuit": "sim", "pursuit_noise_deg": 6.0, "pursuit_delay_s": 0.2}))
        for hold, leads in ((False, (12, 60)), (True, (5, 12, 60))) for lead in leads},
+    # Laya's range sets forward speed through laya_pursuit.RangeSpeed (filtered, own-motion predicted,
+    # gentler gain, asymmetric limits: run.episode speed_law="auto"), as laya-pursuit above now does too.
+    # -oldlaw: the code's law straight on Laya's range, as laya-pursuit flew before (2/12 finished).
+    # -v2: the drone-rover-v2 questions (probe.questions_v2: steer7 over +-60 deg, range8 over 2-8.5 m),
+    # read with laya_pursuit.QUESTIONS["v2"] (steer sharpen 2, gain 1; range sharpen 2, fitted on the
+    # drone-rover-v2 probe); pass the v2 checkpoint with --model.
+    "laya-pursuit-oldlaw": (True, "const:oracle", False, False, {"pursuit": "laya-pursuit", "speed_law": "code"}),
+    "laya-pursuit-v2": (True, "const:oracle", False, False, {"pursuit": "laya-pursuit", "pursuit_questions": "v2"}),
+    "laya-steer-frame-v2": (True, "const:oracle", False, False, {"pursuit": "laya-frame", "pursuit_questions": "v2"}),
+    # model-free stand-ins for laya-pursuit (CPU): the sim locator supplies bearing AND range, with about the
+    # fine-tuned model's steering (4 deg, 0.1 s) and v2's range error (0.45 m noise, -0.1 m bias; probe of
+    # drone-rover-v2); -noisy: 1 m range noise (v1 flew with 1.0-1.7 m error)
+    **{"sim-pursuit%s%s" % (noisy, suffix): (True, "const:oracle", False, False,
+                                             dict({"pursuit": "sim-pursuit", "pursuit_noise_deg": 4.0,
+                                                   "pursuit_delay_s": 0.1, "pursuit_range": rk}, **extra))
+       for noisy, rk in (("", {"range_noise_m": 0.45, "range_offset_m": -0.1}), ("-noisy", {"range_noise_m": 1.0}))
+       for suffix, extra in (("", {}), ("-oldlaw", {"speed_law": "code"}))},
 }
 
 
@@ -201,6 +218,9 @@ def probe_remote(frames: dict, rows: list, model: str = "", n_permutations: int 
     if mode == "strips":
         preds = probe.evaluate_strips(agent, frames, rows, n_strips)
         summary = probe.score_strips(preds, n_strips)
+    elif mode == "v2":
+        preds = probe.evaluate_v2(agent, frames, rows)
+        summary = {"sharpen%g" % k: probe.score_v2(preds, k) for k in (1, 2, 3)}
     else:
         preds = probe.evaluate(agent, frames, rows, n_permutations)
         summary = probe.score(preds)
@@ -235,6 +255,33 @@ def finalize_rover_set(recs_json: list, meta: dict):
     counts = {k: len(v) for k, v in by.items()}
     json.dump(dict(meta, counts=counts), open(os.path.join(base, "meta.json"), "w"), indent=1)
     open(os.path.join(base, "_READY"), "w").close()      # last: the loaders skip a set without it
+    data_vol.commit()
+    return counts
+
+
+@app.function(cpu=2, memory=8192, timeout=20 * 60, volumes={"/data": data_vol})
+def build_rover_set_v2_remote():
+    """/data/vqa/drone_rover_v2 (create-only) from drone_rover's records: steer7 and range8 with soft
+    targets (rover_data.v2_records); images stay in drone_rover/ and are referenced relatively."""
+    _enter()
+    import rover_data
+    base, v1 = "/data/vqa/%s_v2" % ROVER_SET, "/data/vqa/%s" % ROVER_SET
+    data_vol.reload()
+    if os.path.exists(os.path.join(base, "_READY")):
+        raise SystemExit("%s already exists; refusing to overwrite" % base)
+    os.makedirs(base, exist_ok=True)
+    counts = {}
+    for split in ("train", "val"):
+        recs = [json.loads(l) for l in open(os.path.join(v1, split + ".jsonl"))]
+        out = rover_data.v2_records(recs)
+        with open(os.path.join(base, split + ".jsonl"), "w") as f:
+            for r in out:
+                f.write(json.dumps(r) + "\n")
+        counts[split] = len(out)
+    meta = json.load(open(os.path.join(v1, "meta.json")))
+    json.dump(dict(meta, source="rover_data.v2_records(drone_rover)", counts=counts),
+              open(os.path.join(base, "meta.json"), "w"), indent=1)
+    open(os.path.join(base, "_READY"), "w").close()
     data_vol.commit()
     return counts
 
@@ -321,7 +368,7 @@ def probe(frames: str = "/tmp/probe", model: str = "", n_permutations: int = 1, 
     d = os.path.join(HERE, "results", "probe", os.path.basename(os.path.normpath(frames)),
                      (model.strip("/").replace("/ckpt/smolvlm/", "").replace("/", "_") if model else "zero-shot"))
     os.makedirs(d, exist_ok=True)
-    tag = "strips%d" % n_strips if mode == "strips" else "perm%d" % n_permutations
+    tag = {"strips": "strips%d" % n_strips, "v2": "v2"}.get(mode, "perm%d" % n_permutations)
     with open(os.path.join(d, "preds-%s.jsonl" % tag), "w") as f:
         for p in preds:
             f.write(json.dumps(p) + "\n")
@@ -345,6 +392,11 @@ def build_rover_set(train_seeds: str = "0,1,2,3,4,5,6,7", val_seeds: str = "8,9"
     counts = finalize_rover_set.remote(out, {"source": "jev-drone rover_data.py", "courses": courses,
                                              "train_seeds": train_seeds, "val_seeds": val_seeds, "seconds": seconds})
     print("wrote /data/vqa/%s:" % ROVER_SET, counts)
+
+
+@app.local_entrypoint()
+def build_rover_set_v2():
+    print("wrote /data/vqa/%s_v2:" % ROVER_SET, build_rover_set_v2_remote.remote())
 
 
 @app.local_entrypoint()

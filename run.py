@@ -65,8 +65,10 @@ class Guidance:
     open space and flying into it, not by sliding blindly.
     """
 
-    def __init__(self, eye, search_lead_s=5.0, search_on_hold=False):
+    def __init__(self, eye, search_lead_s=5.0, search_on_hold=False, speed_law=None):
         self.eye = eye
+        # forward speed from a model-supplied range (laya_pursuit.RangeSpeed); None: the code's law below
+        self.speed_law = speed_law
         # how far (s) the lost-target search may carry the last fix forward along its velocity
         self.search_lead_s = float(search_lead_s)
         # a fresh hold_course judgment normally pre-empts the baseline search, so with the
@@ -112,10 +114,12 @@ class Guidance:
         best = max(names, key=lambda n: sec[n])
         return self.eye.sector_bearing(best)
 
-    def __call__(self, scene, judg, yaw, z, use_jev, fresh=False, t=0.0, pos=None, fix=None):
+    def __call__(self, scene, judg, yaw, z, use_jev, fresh=False, t=0.0, pos=None, fix=None, vel=None):
         """`fix`: the target as another perception sees it (laya_pursuit.Locator), in the shape of
         scene["target"]; it replaces the camera's for pursuit only. Its range_m is the code's, and
-        None when only the model sees the rover: then hold the not-visible speed."""
+        None when only the model sees the rover: then hold the not-visible speed -- except with a
+        `speed_law`, where range_m is the model's and the law (given fix["t_est"], the estimate's frame
+        time, and `vel`, our world velocity) sets forward speed instead of the line below."""
         if self.yaw_sp is None:
             self.yaw_sp = yaw
         sec = scene["sector_range_m"]
@@ -156,6 +160,9 @@ class Guidance:
         yaw_rel = float(np.clip(self.last_bearing, -0.6, 0.6)) if tgt["visible"] else 0.0
         absolute_yaw = None
         fwd = float(np.clip(1.15 * (rng - STANDOFF) + 1.35, 0.0, 3.6))
+        if self.speed_law is not None:
+            fwd = self.speed_law(t, bool(tgt["visible"]), tgt["range_m"], tgt.get("t_est"), tgt["bearing_deg"],
+                                 yaw, vel)
 
         self.climb_hold = max(0, self.climb_hold - 1)
         alt_sp = CLIMB_ALT if self.climb_hold else CRUISE_ALT
@@ -258,7 +265,9 @@ class Guidance:
 def episode(seed=0, seconds=35.0, use_jev=True, video=None, hz=None, budget=None, realtime=True,
             backend="jev", laya_model=None, laya_image=False, lockstep=False, course="classic", record=None,
             pursuit="code", pursuit_model=None, pursuit_threshold=0.5, pursuit_noise_deg=0.0,
-            pursuit_delay_s=0.0, pursuit_lockstep=False, search_lead_s=5.0, search_on_hold=False):
+            pursuit_delay_s=0.0, pursuit_lockstep=False, search_lead_s=5.0, search_on_hold=False,
+            pursuit_questions="v1", pursuit_sharpen=None, pursuit_gain=None, pursuit_range=None,
+            speed_law="auto", speed_params=None):
     """`record`: a list to append a snapshot to every 0.2 s of sim time (pose, obstacles,
     judgment, and the camera frame the model saw), for rendering after the flight
     (flightgif.py). Cheap, so the flight stays real time.
@@ -267,7 +276,17 @@ def episode(seed=0, seconds=35.0, use_jev=True, video=None, hz=None, budget=None
     "laya-strips" / "laya-frame" (Laya on the RGB frame, laya_pursuit.py), or "sim" (the true
     bearing + `pursuit_noise_deg` noise, `pursuit_delay_s` late: a model-free stand-in). Range, and
     so forward speed, stays the code's in those modes. "laya-pursuit" is laya-frame with Laya's
-    range too (its speed answer, same predict), so Laya sets heading AND forward speed.
+    range too (its range answer, same predict), so Laya sets heading AND forward speed; "sim-pursuit"
+    is its model-free stand-in, the sim locator supplying both (range corrupted by `pursuit_range`,
+    a dict of laya_pursuit.SimBackend's range_* arguments).
+
+    `pursuit_questions` ("v1" | "v2"), `pursuit_sharpen`, `pursuit_gain`: laya_pursuit.FrameBackend's
+    question set and steer read-out (None: the set's defaults).
+
+    `speed_law`: how a MODEL's range becomes forward speed. "auto" (default): "robust" for
+    laya-pursuit and sim-pursuit, where the range is the model's; code pursuit and the heading-only
+    modes always use the code's law. "robust": laya_pursuit.RangeSpeed(**`speed_params`); "code": the
+    code's law on the model's range, as laya-pursuit flew before.
 
     `search_lead_s`: the longest the lost-target search carries the last world fix forward along
     the rover's observed velocity (Guidance._search_heading). `search_on_hold`: search for a
@@ -293,13 +312,21 @@ def episode(seed=0, seconds=35.0, use_jev=True, video=None, hz=None, budget=None
 
     pilot = flight.Pilot(m)
     eye = flight.Eye(m, rgb_size=(512, 384) if ((use_jev and laya_image) or pursuit.startswith("laya")) else None)
-    guide = Guidance(eye, search_lead_s, search_on_hold)
+    model_range = pursuit in ("laya-pursuit", "sim-pursuit")      # the pursuit's range is a model's
+    if speed_law not in ("auto", "robust", "code"):
+        raise ValueError("speed_law must be auto, robust or code, got %r" % speed_law)
+    law = None
+    if model_range and speed_law in ("auto", "robust"):
+        import laya_pursuit
+        law = laya_pursuit.RangeSpeed(**(speed_params or {}))
+    guide = Guidance(eye, search_lead_s, search_on_hold, speed_law=law)
     loc = None
     if pursuit != "code":
         import laya_pursuit
         loc = laya_pursuit.Locator(
             laya_pursuit.make_locator_backend(pursuit, pursuit_model, pursuit_threshold, pursuit_noise_deg,
-                                              pursuit_delay_s, seed),
+                                              pursuit_delay_s, seed, questions=pursuit_questions,
+                                              sharpen=pursuit_sharpen, gain=pursuit_gain, **(pursuit_range or {})),
             truth=lambda: laya_pursuit.true_fix(m, d, scene), lockstep=pursuit_lockstep)
     tac = None
     if use_jev:
@@ -384,15 +411,18 @@ def episode(seed=0, seconds=35.0, use_jev=True, video=None, hz=None, budget=None
                              scene["free_ahead_above_m"], scene["target"]["visible"]),
                           flush=True)
             if loc:
-                # the model's heading; the range (so forward speed) is the model's in laya-pursuit, else the
-                # code's (None where only the model sees the rover)
+                # the model's heading; the range (so forward speed) is the model's in laya-pursuit and
+                # sim-pursuit, else the code's (None where only the model sees the rover)
                 est = loc.read(t, yaw)
                 fix = {"visible": est["visible"], "bearing_deg": est["bearing_deg"],
-                       "range_m": est["range_m"] if pursuit == "laya-pursuit" else scene["target"]["range_m"],
+                       "range_m": est["range_m"] if model_range else scene["target"]["range_m"],
                        "unseen_for_s": est["unseen_for_s"]}
+                if law is not None:
+                    fix["t_est"] = est["t_est"]
                 fix_steps += est["visible"]
                 guide_steps += 1
-            v_des, yaw_cmd, acted, reflex = guide(scene, judg, yaw, pos[2], use_jev, fresh, t, pos, fix)
+            v_des, yaw_cmd, acted, reflex = guide(scene, judg, yaw, pos[2], use_jev, fresh, t, pos, fix,
+                                                  d.qvel[:3].copy() if law is not None else None)
             if TRACE >= 2 and i % 250 == 0:
                 sec = scene["sector_range_m"]
                 print("    t=%5.1f pos=(%5.1f,%5.1f,%4.1f) yaw=%4.0f mv=%-11s commit=%-11s reflex=%d v=(%4.1f,%4.1f,%4.1f)"
@@ -457,7 +487,7 @@ def episode(seed=0, seconds=35.0, use_jev=True, video=None, hz=None, budget=None
                            "loc": None if fix is None else {
                                "visible": bool(fix["visible"]), "bearing_deg": fix["bearing_deg"],
                                "unseen_for_s": fix["unseen_for_s"], "age_s": est.get("age_s"),
-                               "range_m": fix["range_m"] if pursuit == "laya-pursuit" else None,
+                               "range_m": fix["range_m"] if model_range else None,
                                "p_visible": est.get("p_visible")},
                            "true_bearing_deg": (lambda r: float(np.rad2deg(np.arctan2(
                                -np.sin(yaw) * r[0] + np.cos(yaw) * r[1], np.cos(yaw) * r[0] + np.sin(yaw) * r[1]))))(
@@ -516,6 +546,10 @@ def episode(seed=0, seconds=35.0, use_jev=True, video=None, hz=None, budget=None
         out["jev"] = tac.stats()
         tac.close()
     out["pursuit"] = pursuit
+    if model_range:
+        out["speed_law"] = "robust" if law is not None else "code"
+        if law is not None:
+            out["speed_params"] = law.p
     # loss = the pursuit source's view of the rover gone for > 2 s after a first sighting; one still
     # open when the flight ends counts as a loss (and toward the longest), not toward reacquire time
     if unseen_since is not None:
@@ -542,6 +576,8 @@ def episode(seed=0, seconds=35.0, use_jev=True, video=None, hz=None, budget=None
         out.update(pursuit_used_pct=round(100 * fix_steps / max(guide_steps, 1), 1),
                    pursuit_bearing_mae_deg=st["bearing_mae_deg"], pursuit_median_latency_s=st["median_latency_s"],
                    pursuit_p90_latency_s=st["p90_latency_s"], locator=st)
+        if model_range:
+            out["pursuit_range_mae_m"] = st["range_mae_m"]
     return out
 
 
@@ -560,8 +596,25 @@ if __name__ == "__main__":
     p.add_argument("--lockstep", action="store_true", help="pause the sim while the model decides (no latency)")
     p.add_argument("--out", default=None, help="append one JSON line per episode to this file")
     p.add_argument("--course", default="classic", help="classic (world.xml) or a layout in courses.py")
-    p.add_argument("--pursuit", default="code", choices=["code", "laya-strips", "laya-frame", "laya-pursuit", "sim"],
-                   help="source of the pursuit heading (range/speed stay the code's)")
+    p.add_argument("--pursuit", default="code",
+                   choices=["code", "laya-strips", "laya-frame", "laya-pursuit", "sim", "sim-pursuit"],
+                   help="source of the pursuit heading (range/speed stay the code's, except laya-pursuit and "
+                        "sim-pursuit, where the locator's range sets forward speed)")
+    p.add_argument("--pursuit-questions", default="v1", choices=["v1", "v2"],
+                   help="laya-frame/laya-pursuit: v1 steer+speed, or v2 steer7+range8 (probe.questions_v2)")
+    p.add_argument("--pursuit-sharpen", type=float, default=None, help="steer read-out power (default: per question set)")
+    p.add_argument("--pursuit-gain", type=float, default=None, help="steer read-out gain (default: per question set)")
+    p.add_argument("--range-noise", type=float, default=0.0, help="sim-pursuit: range noise std (m)")
+    p.add_argument("--range-bias", type=float, default=1.0, help="sim-pursuit: range multiplier")
+    p.add_argument("--range-offset", type=float, default=0.0, help="sim-pursuit: range offset (m), after the multiplier")
+    p.add_argument("--range-tau", type=float, default=0.0, help="sim-pursuit: range noise correlation time (s; 0 white)")
+    p.add_argument("--range-levels", default=None, help="sim-pursuit: quantize range to v1, v2, or comma centres (m)")
+    p.add_argument("--range-soft", type=float, default=0.0,
+                   help="sim-pursuit: quantization kernel width (m); 0 = nearest level")
+    p.add_argument("--speed-law", default="auto", choices=["auto", "robust", "code"],
+                   help="forward speed from a model's range: auto = robust for laya-pursuit/sim-pursuit")
+    p.add_argument("--speed-param", action="append", default=[], metavar="K=V",
+                   help="laya_pursuit.RangeSpeed parameter, repeatable (e.g. tau_s=0.8 gain=0.6 predict=0)")
     p.add_argument("--pursuit-model", default=None, help="Laya checkpoint for laya-* pursuit (default: tactics.LAYA_MODEL)")
     p.add_argument("--pursuit-threshold", type=float, default=0.5, help="P(visible) needed to steer on an estimate")
     p.add_argument("--pursuit-noise", type=float, default=0.0, help="sim pursuit: bearing noise std (deg)")
@@ -572,12 +625,19 @@ if __name__ == "__main__":
     p.add_argument("--search-on-hold", action="store_true",
                    help="search for a lost rover even while the tactical answer is hold_course")
     a = p.parse_args()
+    rkw = {k: v for k, v, dflt in (("range_noise_m", a.range_noise, 0.0), ("range_bias", a.range_bias, 1.0),
+                                   ("range_offset_m", a.range_offset, 0.0),
+                                   ("range_tau_s", a.range_tau, 0.0), ("range_levels", a.range_levels, None),
+                                   ("range_soft_m", a.range_soft, 0.0)) if v != dflt}
+    sp = {k: (bool(float(v)) if k == "predict" else float(v)) for k, v in (kv.split("=", 1) for kv in a.speed_param)}
     for s in a.seeds:
         r = episode(s, a.seconds, not a.no_jev, a.video, a.hz, a.budget, realtime=not a.fast,
                     backend=a.backend, laya_model=a.laya_model, laya_image=a.laya_image, lockstep=a.lockstep, course=a.course,
                     pursuit=a.pursuit, pursuit_model=a.pursuit_model, pursuit_threshold=a.pursuit_threshold,
                     pursuit_noise_deg=a.pursuit_noise, pursuit_delay_s=a.pursuit_delay, pursuit_lockstep=a.pursuit_lockstep,
-                    search_lead_s=a.search_lead, search_on_hold=a.search_on_hold)
+                    search_lead_s=a.search_lead, search_on_hold=a.search_on_hold,
+                    pursuit_questions=a.pursuit_questions, pursuit_sharpen=a.pursuit_sharpen, pursuit_gain=a.pursuit_gain,
+                    pursuit_range=rkw or None, speed_law=a.speed_law, speed_params=sp or None)
         print(json.dumps(r))
         sys.stdout.flush()
         if a.out:

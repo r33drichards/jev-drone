@@ -15,7 +15,12 @@ Two ways to ask, both with the questions probe.py scores and rover_data.py train
            steer score's expected level, through rover_data.STEER_CENTRES (+27 ... -27 deg).
 
 `sim` is a test double that needs no model: the true bearing from the simulator, plus optional Gaussian
-noise and a delay, so the whole path (worker, staleness, Guidance) runs on a CPU.
+noise and a delay, so the whole path (worker, staleness, Guidance) runs on a CPU. It can corrupt the range
+the same way (noise, a multiplicative bias, correlated noise, quantization to a score's levels), for
+`sim-pursuit`, where it sets forward speed as Laya does in laya-pursuit.
+
+`RangeSpeed` is the forward-speed law for a model-supplied range (laya-pursuit, sim-pursuit): a filtered,
+own-motion-predicted range and a gentler, clipped speed command. Code pursuit keeps run.Guidance's law.
 
 Runs in a worker thread like tactics.Tactician: offer() never blocks the 500 Hz loop (unless lockstep),
 read() returns the latest estimate and its age. Bearing is + to the aircraft's left, as in flight.py.
@@ -29,6 +34,14 @@ from rover_data import STEER_CENTRES
 # fitting needed: 0.81 m mean error on the held-out no-climb frames, a forward-speed command
 # error of 0.52 m/s against 1.00 for a constant guess (results/laya-steer/README.md)
 SPEED_RANGE_M = [2.0, 3.25, 5.5, 9.0]
+# the read-out per question set: (steer question, its level centres, range question, its centres, default
+# steer sharpen, default steer gain, default range sharpen). Fitted on held-out frames: v1 steer (2, 1.16),
+# FrameBackend; v2 (drone-rover-v2/last) steer sharpen 2, gain 1 (4.4 deg MAE, 3.8 within +-34) and range
+# sharpen 2 (0.43 m MAE, bias -0.10 m). v1's range is read raw, as it always was.
+QUESTIONS = {
+    "v1": ("steer", STEER_CENTRES, "speed", SPEED_RANGE_M, 2.0, 1.16, 1.0),
+    "v2": ("steer7", probe.STEER7_CENTRES, "range8", probe.RANGE8_CENTRES, 2.0, 1.0, 2.0),
+}
 FRESH_S = 0.5            # an estimate older than this (frame time -> now) no longer steers
 N_STRIPS = 5
 
@@ -49,23 +62,77 @@ def _wrap(a):
     return (a + np.pi) % (2 * np.pi) - np.pi
 
 
+def level_centres(levels):
+    """None, "v1" (SPEED_RANGE_M), "v2" (probe.RANGE8_CENTRES), or a list / comma string of centres (m)."""
+    if levels is None or levels == "":
+        return None
+    if isinstance(levels, str):
+        if levels in QUESTIONS:
+            return list(QUESTIONS[levels][3])
+        levels = levels.split(",")
+    return [float(v) for v in levels]
+
+
+def quantize_range(r, centres, soft_m=0.0):
+    """What a score question over range levels reads back for a rover at `r` m. soft_m 0: the nearest
+    level's centre (a hard, confident answer). soft_m > 0: the expected value over the levels with
+    P(level) ~ exp(-(r - centre)^2 / 2 soft_m^2) -- a calibrated score's spread, which also compresses
+    answers toward the middle at the ends of the scale, as the v1 speed read-out did."""
+    c = np.asarray(centres, dtype=float)
+    if soft_m <= 0:
+        return float(c[int(np.argmin(np.abs(c - r)))])
+    w = np.exp(-0.5 * ((r - c) / soft_m) ** 2)
+    if w.sum() < 1e-12:                   # far outside the scale: all weight on the nearest end
+        return float(c[int(np.argmin(np.abs(c - r)))])
+    return float((w * c).sum() / w.sum())
+
+
 class SimBackend:
     """Test double: the truth, plus noise. `delay_s` is applied in SIM time by the Locator, which also
     takes no new frame until the last answer is out, so the answer rate is 1/delay -- the shape of a
     real model (strips on an L4: 5 x ~40 ms ~ 0.2 s, ~5 Hz). Answered inline (`instant`), so a sim
-    flight is deterministic: no thread-timing race on when the answer lands."""
-    instant = True
+    flight is deterministic: no thread-timing race on when the answer lands.
 
-    def __init__(self, noise_deg=0.0, delay_s=0.0, seed=0):
+    Range (used only by sim-pursuit, where it sets forward speed): true range x `range_bias` +
+    `range_offset_m`, plus Gaussian noise of std `range_noise_m` -- white, or AR(1) with correlation time `range_tau_s` (a model
+    misjudging one scene misjudges the next frame too; steps are taken per answer, at the answer
+    interval max(delay, one camera frame)) -- then, with `range_levels`, read back through
+    quantize_range(). All off by default, and drawn from their own random stream, so the bearing
+    noise (and every existing sim flight) is unchanged."""
+    instant = True
+    FRAME_S = 33 * 0.002                   # run.episode's camera interval
+
+    def __init__(self, noise_deg=0.0, delay_s=0.0, seed=0, range_noise_m=0.0, range_bias=1.0,
+                 range_levels=None, range_soft_m=0.0, range_tau_s=0.0, range_offset_m=0.0):
         self.noise_deg, self.delay_s = float(noise_deg), float(delay_s)
         self.rng = np.random.default_rng(seed)
         self.model = "sim(noise=%g,delay=%g)" % (noise_deg, delay_s)
+        self.range_noise_m, self.range_bias = float(range_noise_m), float(range_bias)
+        self.range_levels, self.range_soft_m = level_centres(range_levels), float(range_soft_m)
+        self.range_tau_s, self.range_offset_m = float(range_tau_s), float(range_offset_m)
+        self.corrupt_range = bool(self.range_noise_m or self.range_bias != 1.0 or self.range_offset_m
+                                  or self.range_levels)
+        if self.corrupt_range:
+            self.rng_r = np.random.default_rng([seed, 7919])
+            self._n = 0.0                                  # AR(1) state, in units of std
+            dt = max(self.delay_s, self.FRAME_S)
+            self._rho = float(np.exp(-dt / self.range_tau_s)) if self.range_tau_s > 0 else 0.0
+            self.model += "+range(noise=%g,bias=%g,offset=%g,tau=%g%s)" % (
+                self.range_noise_m, self.range_bias, self.range_offset_m, self.range_tau_s,
+                ",levels=%s,soft=%g" % (self.range_levels, self.range_soft_m) if self.range_levels else "")
+
+    def _range(self, r):
+        if not self.corrupt_range:
+            return r
+        self._n = self._rho * self._n + np.sqrt(1 - self._rho ** 2) * float(self.rng_r.normal())
+        r = max(0.3, r * self.range_bias + self.range_offset_m + self.range_noise_m * self._n)
+        return quantize_range(r, self.range_levels, self.range_soft_m) if self.range_levels else r
 
     def locate(self, frame, truth):
         vis, b, rng = truth
         if not vis:
             return False, None, 0.0, None
-        return True, b + self.noise_deg * float(self.rng.normal()), 1.0, rng
+        return True, b + self.noise_deg * float(self.rng.normal()), 1.0, self._range(rng)
 
 
 class _Laya:
@@ -119,26 +186,43 @@ class StripsBackend(_Laya):
 
 
 class FrameBackend(_Laya):
-    """One predict on the whole frame: visible (noul) and steer (score over 5 levels).
+    """One predict on the whole frame: visible (noul) and steer (a score over levels).
 
-    The steer score's expected level compresses toward the centre: the calibrated temperature
+    `questions`: "v1" asks probe.questions() "steer" (5 levels, rover_data.STEER_CENTRES, +-27 deg)
+    and, with `speed`, "speed" (4 bands, read as SPEED_RANGE_M); "v2" asks probe.questions_v2()
+    "steer7" (7 levels, probe.STEER7_CENTRES, +-60 deg) and "range8" (8 levels, probe.RANGE8_CENTRES,
+    2-8.5 m). Bearing and range are each the score's expected level centre, after raising the level
+    probabilities to `sharpen` (steer) / `range_sharpen` (range) and renormalising.
+
+    The v1 steer score's expected level compresses toward the centre: the calibrated temperature
     flattens the levels, and the outer centres sit at +-27 deg. Read raw, a rover 12-25 deg off
     the nose came out ~8 deg too central, so pursuit under-turned and lost it. `sharpen` raises the
-    level probabilities to that power and renormalises; `gain` rescales the result. The defaults
+    level probabilities to that power and renormalises; `gain` rescales the result. The v1 defaults
     (2, 1.16) were fitted on held-out mixed frames within +-34 deg (pursuit's turn clip) and
     scored on the unseen no-climb layout: 4.5 deg mean error there, against 6.3 read raw
-    (results/probe/README.md)."""
+    (results/probe/README.md). v2's (sharpen 2, gain 1; range sharpen 2) were fitted the same way on the
+    drone-rover-v2 checkpoint (QUESTIONS)."""
 
-    def __init__(self, model=None, threshold=0.5, sharpen=2.0, gain=1.16, speed=False, **kw):
-        """`speed`: also ask probe.questions()["speed"] in the same predict and return a range (m),
-        so Laya sets forward speed too (pursuit="laya-pursuit")."""
+    def __init__(self, model=None, threshold=0.5, sharpen=None, gain=None, speed=False, questions="v1",
+                 range_sharpen=None, **kw):
+        """`speed`: also ask the range question in the same predict and return a range (m), so Laya sets
+        forward speed too (pursuit="laya-pursuit"). `sharpen` / `gain` / `range_sharpen` None: the question
+        set's default."""
         super().__init__(model, threshold, **kw)
-        self.sharpen, self.gain, self.speed = sharpen, gain, speed
-        self.model = ("laya-pursuit:" if speed else "laya-frame:") + (model or "default")
-        qs = probe.questions()
-        self.qs = {"visible": qs["visible"], "steer": qs["steer"]}
+        if questions not in QUESTIONS:
+            raise ValueError("questions must be one of %s, got %r" % (sorted(QUESTIONS), questions))
+        steer_q, self.steer_c, range_q, self.range_c, sh, g, rsh = QUESTIONS[questions]
+        self.sharpen = sh if sharpen is None else float(sharpen)
+        self.gain = g if gain is None else float(gain)
+        self.range_sharpen = rsh if range_sharpen is None else float(range_sharpen)
+        self.speed, self.questions = speed, questions
+        self.model = ("laya-pursuit:" if speed else "laya-frame:") + (model or "default") + (
+            "" if questions == "v1" else ":" + questions)
+        qs = probe.questions() if questions == "v1" else probe.questions_v2()
+        self.steer_q, self.range_q = steer_q, range_q
+        self.qs = {"visible": qs["visible"], steer_q: qs[steer_q]}
         if speed:
-            self.qs["speed"] = qs["speed"]
+            self.qs[range_q] = qs[range_q]
         self.warm_up()
 
     def locate(self, frame, truth=None):
@@ -146,24 +230,113 @@ class FrameBackend(_Laya):
         pv = float(a["visible"]["noul"])
         if pv < self.threshold:
             return False, None, pv, None
-        p = np.array([float(a["steer"]["probabilities"][str(i)]) for i in range(len(STEER_CENTRES))]) ** self.sharpen
+        p = np.array([float(a[self.steer_q]["probabilities"][str(i)]) for i in range(len(self.steer_c))]) ** self.sharpen
         rng = None
         if self.speed:
-            ps = [float(a["speed"]["probabilities"][str(i)]) for i in range(len(SPEED_RANGE_M))]
-            rng = float(np.dot(ps, SPEED_RANGE_M))
-        return True, self.gain * float((p / p.sum() * np.array(STEER_CENTRES)).sum()), pv, rng
+            ps = np.array([float(a[self.range_q]["probabilities"][str(i)]) for i in range(len(self.range_c))])
+            ps = ps ** self.range_sharpen
+            rng = float(np.dot(ps / max(ps.sum(), 1e-9), self.range_c))
+        return True, self.gain * float((p / p.sum() * np.array(self.steer_c)).sum()), pv, rng
 
 
-def make_locator_backend(mode, model=None, threshold=0.5, noise_deg=0.0, delay_s=0.0, seed=0):
-    if mode == "sim":
-        return SimBackend(noise_deg, delay_s, seed)
+def make_locator_backend(mode, model=None, threshold=0.5, noise_deg=0.0, delay_s=0.0, seed=0, questions="v1",
+                         sharpen=None, gain=None, **range_kw):
+    """`range_kw`: SimBackend's range corruption (range_noise_m, range_bias, range_levels, range_soft_m,
+    range_tau_s), for the sim modes. `questions` / `sharpen` / `gain`: FrameBackend's read-out."""
+    if mode in ("sim", "sim-pursuit"):
+        return SimBackend(noise_deg, delay_s, seed, **range_kw)
     if mode == "laya-strips":
         return StripsBackend(model, threshold)
     if mode == "laya-frame":
-        return FrameBackend(model, threshold)
+        return FrameBackend(model, threshold, sharpen, gain, questions=questions)
     if mode == "laya-pursuit":
-        return FrameBackend(model, threshold, speed=True)
-    raise ValueError("pursuit locator must be sim, laya-strips or laya-frame, got %r" % mode)
+        return FrameBackend(model, threshold, sharpen, gain, speed=True, questions=questions)
+    raise ValueError("pursuit locator must be sim, sim-pursuit, laya-strips, laya-frame or laya-pursuit, got %r" % mode)
+
+
+class RangeSpeed:
+    """Forward speed from a MODEL's range to the rover (laya-pursuit, sim-pursuit); code pursuit keeps
+    run.Guidance's law, fwd = clip(1.15 (range - 3.5) + 1.35, 0, 3.6), which is fine on the segmentation
+    range (~0.1 m error) and fails on a model's: every range error becomes 1.15x as much speed error,
+    every estimate straight away, and a low reading brakes the aircraft to a stop while the rover drives
+    on. Four changes, each a parameter:
+
+    1. Filter the range, knowing when each estimate was taken (they arrive at ~10-15 Hz, irregularly, and
+       stop while the rover is out of view): first-order, time constant `tau_s`, so a burst of estimates
+       counts for its duration, not its number.
+    2. Predict between estimates from our own motion (`predict`): range changes at (rover speed along the
+       line of sight - our own velocity along it). Our velocity is known; the rover's along-LOS speed `u`
+       is taken as `rover_speed` (the courses drive it at a constant 1.15 m/s). The filter then has no lag
+       when WE change speed, which is most of the range change, so `tau_s` can be long enough to average
+       noise. Each estimate is also carried forward over its own age before it is fused. `rate_tau_s` > 0
+       also corrects `u` from the filter's innovations (time constant rate_tau_s, clamped to
+       [0, `target_max_speed`]); off by default: in the sim it wandered 0.4-1.6 m/s through occlusions and
+       re-acquisitions and did not fly better (76 vs 74 of 100 finished).
+    3. A gentler gain (`gain` m/s per m, vs 1.15), with a `deadband_m` either side of the standoff, and
+       `cruise` (m/s) at the standoff.
+    4. Asymmetric limits: slower than `fwd_floor` only once the filtered range is inside `close_m` (a low
+       reading alone cannot stop us and let the rover drive away: falling behind is what lost the v1
+       flights), at most `fwd_max`; while the rover is out of view, coast on the predicted range for up
+       to `coast_s` at no more than `lost_cap` (we may have overrun it), then the code's lost-target speed
+       (1.15 x 1.5 + 1.35 = 3.07 m/s) capped at `lost_cap`. After `reset_s` without an estimate, the next
+       one re-initialises the filter instead of being averaged into a stale prediction."""
+
+    DEFAULTS = dict(standoff=3.5, tau_s=0.8, predict=True, rate_tau_s=0.0, gain=0.6, deadband_m=0.3,
+                    cruise=1.35, fwd_floor=0.9, close_m=2.6, fwd_max=3.6, lost_cap=2.4, coast_s=1.5,
+                    reset_s=3.0, rover_speed=1.15, target_max_speed=1.6)
+
+    def __init__(self, **params):
+        bad = set(params) - set(self.DEFAULTS)
+        if bad:
+            raise ValueError("unknown RangeSpeed parameters: %s" % sorted(bad))
+        self.p = dict(self.DEFAULTS, **params)
+        for k, v in self.p.items():
+            setattr(self, k, v)
+        self.r = None               # filtered range (m), predicted to the last call's time
+        self.u = self.rover_speed   # rover speed along the line of sight (m/s)
+        self.los = None             # world angle of the line of sight at the last estimate (rad)
+        self.t = None               # time of the last call
+        self.t_meas = None          # frame time of the last estimate fused
+        self.n_meas = 0
+
+    def __call__(self, t, visible, range_m, t_est, bearing_deg, yaw, vel):
+        """-> forward speed (m/s). `range_m` / `t_est`: the latest estimate and its frame time (None when
+        not visible); `bearing_deg`: its bearing at the live `yaw`; `vel`: our world velocity (>= 2 axes)."""
+        v_own = 0.0
+        if vel is not None and self.los is not None:
+            v_own = float(vel[0] * np.cos(self.los) + vel[1] * np.sin(self.los))
+        if self.r is not None and self.t is not None and self.predict:
+            self.r = max(0.5, self.r + (self.u - v_own) * (t - self.t))
+        self.t = t
+        if visible and range_m is not None and bearing_deg is not None:
+            self.los = float(yaw + np.deg2rad(bearing_deg))
+            if t_est is None:
+                t_est = t
+            if self.r is None or self.t_meas is None or t_est - self.t_meas > self.reset_s:
+                self.r, self.u = float(range_m), self.rover_speed
+                self.t_meas = t_est
+                self.n_meas += 1
+            elif t_est > self.t_meas:
+                z = float(range_m) + ((self.u - v_own) * (t - t_est) if self.predict else 0.0)
+                dtm = t_est - self.t_meas
+                e = z - self.r
+                self.r += (1.0 - np.exp(-dtm / self.tau_s)) * e
+                if self.predict and self.rate_tau_s > 0:
+                    self.u = float(np.clip(self.u + dtm / self.rate_tau_s * e / self.tau_s,
+                                           0.0, self.target_max_speed))
+                self.t_meas = t_est
+                self.n_meas += 1
+        if self.r is None:                      # never seen: the code's not-visible speed
+            return min(1.15 * 1.5 + 1.35, self.lost_cap)
+        lost_for = t - self.t_meas
+        if not visible and lost_for > self.coast_s:
+            return min(1.15 * 1.5 + 1.35, self.lost_cap)
+        e = self.r - self.standoff
+        e = np.sign(e) * max(abs(e) - self.deadband_m, 0.0)
+        fwd = self.cruise + self.gain * e
+        lo = 0.0 if self.r < self.close_m else self.fwd_floor
+        hi = self.fwd_max if visible else min(self.fwd_max, self.lost_cap)
+        return float(np.clip(fwd, lo, hi))
 
 
 class Locator:
@@ -239,7 +412,7 @@ class Locator:
             e = self._latest
         if e is None:
             return {"visible": False, "bearing_deg": None, "range_m": None, "age_s": None, "fresh": False,
-                    "unseen_for_s": None}
+                    "unseen_for_s": None, "t_est": None}
         age = now - e["t"]
         fresh = age < self.fresh_s
         b = e["bearing_deg"]
@@ -248,7 +421,8 @@ class Locator:
         vis = bool(fresh and e["visible"])
         unseen = 0.0 if vis else (None if self._last_seen is None else round(now - self._last_seen, 2))
         return {"visible": vis, "bearing_deg": b if vis else None, "range_m": e.get("range_m") if vis else None,
-                "age_s": round(age, 3), "fresh": fresh, "unseen_for_s": unseen, "p_visible": e["p_visible"]}
+                "age_s": round(age, 3), "fresh": fresh, "unseen_for_s": unseen, "p_visible": e["p_visible"],
+                "t_est": e["t"]}
 
     def _worker(self):
         while not self._stop.is_set():
