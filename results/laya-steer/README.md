@@ -63,3 +63,43 @@ on no-climb: 4.5° mean error, against 6.3° read raw and 12.9° for always stra
 **Next:** find where the losses happen, with recorded GIFs of the 12%-visibility runs. The first
 pocket, where the rover drives through a hatch out of sight, is the likely place. That is the
 reacquisition case the object-permanence proposal (occluded / reappear questions) is aimed at.
+
+## v2: wider steering, finer range, Laya sets speed (`results/laya/20260928-093007` + `-093623`)
+
+**Checkpoint:** `drone-rover-v2`, continued from v1 on `drone_rover_v2`. That is the same frames
+relabelled with `steer7` (7 levels, ±60°) and `range8` (8 levels, 2-8.5 m), both with soft
+targets. 18 min on an A100. We fly `last/` (step 4238, drone val 93.2%), not the trainer's
+`best/` (step 2119, 90.7%, picked on the four-set mean). On held-out frames, sharpened power 2:
+
+| | v1 | v2 last |
+|---|---|---|
+| bearing error, all / within ±34° | ~6° (corrected) / 4.5° | 4.4° / 3.8° |
+| under-read at 25-45° / 45°+ | -19° past 25° (raw) | -3.6° / -8.1° |
+| range error | 0.81 m | 0.43 m (bias -0.10 m) |
+| forward-speed command error | 0.52 m/s | 0.30 m/s |
+
+**Speed law:** `RangeSpeed` (laya_pursuit.py) is used whenever the range comes from a model. It
+low-passes the range over time and predicts it between estimates from the drone's own velocity.
+It uses gain 0.6 with a 0.3 m deadband at the 3.5 m standoff, a 0.9 m/s floor unless close, and
+a 2.4 m/s cap while the rover is out of view. In the sim stand-in (bearing 4° + 0.1 s) it
+finished 202/260 flights against 176/260 for the code law, and held 15-19/20 up to ~1 m of
+range error.
+
+**Flights** (90 s, oracle tactics, budget 240, runs finished):
+
+| | mixed | no-climb | total | v1 |
+|---|---|---|---|---|
+| code pursuit | 6/6 | 6/6 | 12/12 | 12/12 |
+| Laya heading, code speed (`laya-steer-frame-v2`) | 4/6 | 3/6 | 7/12 | 9/12 |
+| **Laya heading and speed (`laya-pursuit-v2`)** | **5/6** | **3/6** | **8/12** | **2/12** |
+
+- **Letting Laya set speed is now viable:** 8/12 against 2/12 with v1's 4 speed bands and the
+  code's speed law.
+- **Heading-only flights did not improve** (7/12 against 9/12). At 12 flights per cell a
+  difference of 2 is within the run-to-run variance seen before: real-time flights are not
+  deterministic, and the same config has swung by 2-3 between runs.
+- **Failures are still early rover losses that are never recovered,** mostly at the pockets
+  (rover in view ~12-30% in failed runs). Code pursuit is still 12/12, so reacquisition, not
+  perception accuracy, is the remaining gap.
+- The run was interrupted by a container restart after 32 of 36 flights. The 4 missing
+  (no-climb laya-pursuit-v2, seeds 2, 20, 21, 22) were re-flown separately in `-093623`.
