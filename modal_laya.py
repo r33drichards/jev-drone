@@ -1082,7 +1082,7 @@ def realtest_samples(preds_dir: str, frames: str, wording: str = "target", set_n
                      out: str = "results/realtest/samples"):
     """Draw the listed frames (comma-separated names) with each checkpoint's answers (from
     realtest_score --preds-dir) to small PNGs."""
-    runs = [("zero-shot", "zero-shot"), ("v2 last", "drone-rover-v2_last"), ("v3.1 best", "drone-rover-v3.1_best")]
+    runs = [("zero-shot", "zero-shot"), ("v2 last", "ckpt_smolvlm_drone-rover-v2_last"), ("v3.1 best", "ckpt_smolvlm_drone-rover-v3.1_best")]
     preds = {tag: {p["frame"]: p for p in json.load(open(os.path.join(preds_dir, tag + ".json")))
                    if p["wording"] == wording} for _, tag in runs}
     names = frames.split(",")

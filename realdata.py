@@ -458,5 +458,5 @@ def draw_sample(frames_dir, row, answers, width=384):
         d.text((3, img.size[1] + 2 + line * (k + 1)),
                "%s: P(vis) %.2f, %s, steer %+.0f deg, range %.1f m" % (label, p["p_visible"], p["where"], eb, er), fill=c)
     b = io.BytesIO()
-    out.save(b, "PNG", optimize=True)
+    out.convert("P", palette=Image.Palette.ADAPTIVE, colors=128).save(b, "PNG", optimize=True)
     return b.getvalue()
