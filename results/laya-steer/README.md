@@ -149,3 +149,44 @@ frames only:
   into pockets (13-37 threshold climbs per flight, many ending at the first pocket's far wall).
   No threshold gives both recall and precision. It needs more and harder tactical data: beam
   approaches, plus pocket front walls labelled hold.
+
+## v3.2: tactics and town data (`results/laya/20260928-223613`, `-230207`, `-230719`, `-233520`)
+
+drone-rover-v3.2a = v3.1 plus two new sets: drone_rover_tac (the `tactics` course, where beams and
+pocket front walls alternate, so climb and hold are seen side by side) and drone_rover_town (Nuketown
+figure-8 laps). Its read-out was fitted with readout.py (steer and range power 1.5). v3.2b (a
+different data mix) tied on steering and was worse on reappear (67.2% vs 72.6%), so v3.2a flew.
+
+**Probe (held-out frames):** steer 3.8° within ±34°, range 0.40 m, reappear 72.6% (v3.1 70.2%).
+Beam vs pocket P(climb) AUC 0.95, where v3.1 could not separate them. Best single threshold 0.1543:
+beam recall 78%, false climbs on 4.8% of pocket frames. Town: visible AUC 0.999, bearing 3.5°.
+
+**Flights, 24 seeds on each of mixed and no-climb** (90 s, budget 240). Bars: code pursuit 45/48,
+v2 + v3.1 hybrid 43/48.
+
+| config | pursuit | reacquire | tactics | mixed | no-climb | total |
+|---|---|---|---|---|---|---|
+| laya-full-v3.2 | v3.2a | v3.2a | v3.2a, P ≥ 0.1543 | 7 | 7 | 14/48 |
+| laya-pursuit-v3.2-reacq | v3.2a | v3.2a | oracle | 17 | 13 | 30/48 |
+| laya-tactics-v3.2 | code | – | v3.2a, P ≥ 0.1543 | 10 | 7 | 17/48 |
+| laya-tactics-v3.2-vote | code | – | v3.2a, 3 × P ≥ 0.12 | 16 | 22 | 38/48 |
+| hybrid-v2pursuit-v3.2-oracle | v2 | v3.2a | oracle | 22 | 18 | 40/48 |
+| **hybrid-v2pursuit-v3.2-vote** | v2 | v3.2a | v3.2a, 3 × P ≥ 0.12 | 20 | 21 | **41/48** |
+
+**Town, 6 laps** (120 s, budget 300; code pursuit 6/6, v2 pursuit 0/6):
+laya-full-v3.2 4/6, laya-pursuit-v3.2-reacq 4/6, hybrid-v2pursuit-v3.2-vote 0/6.
+
+- **A single threshold call is fatal.** One P(climb) over the threshold commits Guidance to a climb,
+  and over a pocket's low front wall that flies the aircraft into the pocket (stalls at x ≈ 26.5, the
+  first pocket's far wall). In the tac probe flights 0.1543 was crossed at least once in 14 of 21
+  pocket visits. tactics.LayaV3Backend's `climb_votes=3` at 0.12 fires in 1-2 of 21 pocket visits and
+  16 of 17 beam approaches (probe frames replayed at the flight's ~1.5 calls/s). In flight this took
+  Laya tactics from 17/48 to 38/48; no-climb went from 7 to 22/24. The remaining mixed failures stall
+  at x ≈ 54 (decoy) and x ≈ 74 (second pocket's far wall), so some false climbs survive the votes.
+- **The first all-Laya flight near the bars:** hybrid-v2pursuit-v3.2-vote. Laya makes every decision:
+  v2 steers and sets speed, v3.2a reacquires and decides climbs. It finished 41/48, against 45/48 for
+  code and 43/48 for the v3.1 hybrid, which still had oracle tactics.
+- **v3.2a's own pursuit is still weaker in flight than v2** on the corridors (30/48 against 40/48 with
+  the same reacquisition). Most failures lose the rover at the first pocket and never find it again.
+  In the town the reverse holds: v2 pursuit 0/6 (red scenery, under-turning), v3.2a 4/6. No single
+  checkpoint steers well everywhere yet.

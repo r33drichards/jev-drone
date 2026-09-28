@@ -146,6 +146,13 @@ CONFIGS = {
            # one call over 0.1543 flew the aircraft into the first pocket in half the mixed flights
            ("laya-full-v3.2-vote", "laya-v3", dict(_V32_PURSUIT, reacquire="laya", tactics_kw=_V32_VOTE)),
            ("laya-tactics-v3.2-vote", "laya-v3", {"pursuit": "code", "tactics_kw": _V32_VOTE}))},
+    # v3.2 hybrids: drone-rover-v2/last flies the pursuit (v3.2a's own pursuit + reacquisition finished 30/48:
+    # most failures lost the rover at the first pocket and never found it), --model (v3.2a) answers
+    # reacquisition, and tactics (climb_votes) in -vote / oracle tactics in -oracle
+    **{"hybrid-v2pursuit-v3.2" + suffix: (True, backend, backend == "laya-v3", False,
+                                          dict({"pursuit": "laya-pursuit", "pursuit_questions": "v2", "reacquire": "laya",
+                                                "pursuit_model": "/ckpt/smolvlm/drone-rover-v2/last"}, **extra))
+       for suffix, backend, extra in (("-oracle", "const:oracle", {}), ("-vote", "laya-v3", {"tactics_kw": _V32_VOTE}))},
     "code-pursuit-simreacq": (True, "const:oracle", False, False, {"pursuit": "code", "reacquire": "sim"}),
     "sim-pursuit-simreacq": (True, "const:oracle", False, False,
                              {"pursuit": "sim-pursuit", "pursuit_noise_deg": 4.0, "pursuit_delay_s": 0.1,
