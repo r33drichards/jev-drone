@@ -103,3 +103,49 @@ range error.
   perception accuracy, is the remaining gap.
 - The run was interrupted by a container restart after 32 of 36 flights. The 4 missing
   (no-climb laya-pursuit-v2, seeds 2, 20, 21, 22) were re-flown separately in `-093623`.
+
+## v3 / v3.1: reacquisition and tactics (`results/laya/20260928-183953`, `-191230`, `-192706`)
+
+**Checkpoints.** `drone-rover-v3` added reacquisition questions (`occluded`, `reappear`,
+`reappear_eta`) and the tactical `maneuver` question (`drone_rover_v3`: new oracle flights with
+the frame plus a small JSON context). `drone-rover-v3.1` added `drone_rover_v3b`: rotated views
+and sim failure flights, which raised the "behind" training examples from 303 to 3,716. Each
+fine-tune took about 20 min on an A100.
+
+**Held-out probes** (`results/probe/rover-test-v3*`), v3.1 on the behind-heavy set, lost-rover
+frames only:
+
+| | v3 | v3.1 | baseline |
+|---|---|---|---|
+| reappear side | 50% | 70% | 36% |
+| "behind" recognised | 33% | 73% | |
+| occluded, AUC | 0.80 | 0.95 | 0.50 |
+| reappear time, level | 55% | 82% | 52% |
+
+**Flights** (mixed + no-climb, oracle tactics unless noted, runs finished):
+
+| | seeds | finished |
+|---|---|---|
+| code pursuit | 0-23 | 45/48 (94%) |
+| Laya v2 pursuit | 0-23 | 39/48 (81%) |
+| v3.1 pursuit (v2 read-out) | 0-23 | 22/48 |
+| v3.1 pursuit (refitted read-out) | 0-11 | 13/24 (v2: 21/24 on the same seeds) |
+| v3.1 full control (tactics + pursuit + reacquisition) | 0-11 | 6/24 |
+| **v2 pursuit + v3.1 reacquisition** | 0-23 | **43/48 (90%)** |
+
+- **Reacquisition works.** With v2 flying the pursuit and v3.1 answering where a lost rover will
+  reappear, runs still lost at the end fell from 32 to 17 of 48, and no-climb went from 19/24 to
+  23/24. When it acted, the side was right 78% of the time (median per flight). The turn only
+  fires when v3.1 says the rover is NOT hidden behind something in view; turning regardless lost
+  flights in CPU tests.
+- **Re-fit the read-out for every checkpoint.** v3.1's calibrated score temperature is 0.74
+  (v2: 2.10). The v2 read-out (power 2) snapped 60% of its steer estimates onto level centres,
+  so the heading moved in 15° jumps (in-flight error 9.7° against 5.6°). Power 0.6 (steer) and
+  0.75 (range) fix the snapping.
+- **v3.1 is still a worse pursuit pilot than v2 in flight,** although it matches it on held-out
+  frames. The extra training traded away some in-flight steering.
+- **v3.1's tactics are not usable.** P(climb) rarely exceeds 0.2. At 0.12 the climb answer
+  catches 54-66% of real climbs, but its precision is only 29% on pocket-heavy frames: it climbs
+  into pockets (13-37 threshold climbs per flight, many ending at the first pocket's far wall).
+  No threshold gives both recall and precision. It needs more and harder tactical data: beam
+  approaches, plus pocket front walls labelled hold.
