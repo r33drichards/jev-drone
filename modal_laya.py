@@ -930,3 +930,30 @@ def baseline(configs: str = "no-model,laya-text,laya-image,laya-text-lockstep", 
                  % (r["pursuit"], r.get("pursuit_used_pct"), r.get("pursuit_bearing_mae_deg"),
                     r.get("pursuit_median_latency_s"), r.get("pursuit_p90_latency_s"))), flush=True)
     print("wrote", path)
+
+
+# ---- real drone footage test set (realdata.py): evaluation only, never training ----
+# UAV123 / VisDrone-SOT are research / non-commercial datasets. They are downloaded and converted in
+# these CPU jobs straight onto laya-datasets (/data/realtest/), never onto the local disk.
+real_image = (modal.Image.debian_slim(python_version="3.12").pip_install("requests", "numpy", "pillow")
+              .add_local_file(os.path.join(HERE, "realdata.py"), "/root/realdata.py"))
+
+
+@app.function(image=real_image, cpu=2, memory=8192, timeout=3 * 60 * 60,
+              volumes={"/data": data_vol})
+def realtest_fetch(name: str):
+    """The layout of one realdata.SOURCES zip, read remotely (only its central directory is fetched)."""
+    import sys
+    sys.path.insert(0, "/root")
+    import realdata
+    return json.dumps(realdata.inspect(name))
+
+
+@app.local_entrypoint()
+def realtest_inspect(names: str = "uav123_10fps,visdrone_sot"):
+    """Fetch each source (in parallel) and print its zip layout."""
+    ns = names.split(",")
+    for n, fc in zip(ns, [realtest_fetch.spawn(n) for n in ns]):
+        r = _get(fc)
+        print("=====", n)
+        print(r if isinstance(r, Exception) else json.dumps(json.loads(r), indent=0)[:12000], flush=True)
