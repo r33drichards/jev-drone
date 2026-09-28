@@ -136,6 +136,9 @@ def evaluate(agent, frames, rows, n_permutations=1):
     return out
 
 
+STRIP_Q = {"type": "noul", "instructions":
+           "Crop of a quadrotor's forward camera. Is there a small red ground rover (a red box with a "
+           "thin red mast) in this image?"}
 STRIP_BAND = (0.30, 0.90)   # the rows the rover can occupy: it is on the floor, 2-8 m ahead, camera 12 deg down
 
 
@@ -156,9 +159,7 @@ def strips(img, n=5, band=STRIP_BAND, size=512):
 def evaluate_strips(agent, frames, rows, n=5):
     """Ask one noul per strip: is the rover in this crop? (the detector-regions branch's 'map' shape)."""
     from PIL import Image
-    q = {"rover": {"type": "noul", "instructions":
-                   "Crop of a quadrotor's forward camera. Is there a small red ground rover (a red box with a "
-                   "thin red mast) in this image?"}}
+    q = {"rover": STRIP_Q}
     out = []
     for r in rows:
         img = Image.open(io.BytesIO(frames[r["frame"]])).convert("RGB")

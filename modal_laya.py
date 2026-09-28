@@ -35,6 +35,9 @@ image = (
 )
 app = modal.App("jev-drone-laya", image=image)
 hf_vol = modal.Volume.from_name("laya-hf-cache")
+data_vol = modal.Volume.from_name("laya-datasets")
+ckpt_vol = modal.Volume.from_name("laya-checkpoints")   # fine-tuned runs: pass --model /ckpt/smolvlm/<run>/best
+ROVER_SET = "drone_rover"          # /data/vqa/drone_rover on laya-datasets, for laya-vision's finetune_long
 
 # name -> (use the model?, backend, laya sees the camera frame, lockstep)
 CONFIGS = {
@@ -124,7 +127,8 @@ def fly_gif(config: str, seed: int, seconds: float, course: str, budget: int = 0
     return r, flightgif.make_gif(rec, course, seed, title, "/root/jev")
 
 
-@app.function(gpu=["L4", "A10G"], cpu=4, memory=16384, timeout=60 * 60, volumes={"/cache/hf": hf_vol})
+@app.function(gpu=["L4", "A10G"], cpu=4, memory=16384, timeout=60 * 60,
+              volumes={"/cache/hf": hf_vol, "/ckpt": ckpt_vol.read_only()})
 def probe_remote(frames: dict, rows: list, model: str = "", n_permutations: int = 1, mode: str = "full",
                  n_strips: int = 5):
     """probe.py: ask Laya where the rover is in each recorded frame, from the whole frame ("full") or one
@@ -140,6 +144,58 @@ def probe_remote(frames: dict, rows: list, model: str = "", n_permutations: int 
         summary = probe.score(preds)
     # as JSON text: numpy scalars would not unpickle where the Modal client has no numpy
     return json.dumps(preds, default=float), json.dumps(summary, default=float)
+
+
+@app.function(cpu=2, memory=4096, timeout=30 * 60, volumes={"/data": data_vol})
+def collect_job(course: str, seed: int, split: str, seconds: float = 60.0):
+    """One oracle flight -> its frames' images on the datasets volume, and their records (rover_data.py)."""
+    _enter()
+    import rover_data
+    frames = rover_data.collect_flight(course, seed, seconds)
+    recs = rover_data.records(frames, "/data/vqa/%s/images" % ROVER_SET)
+    data_vol.commit()
+    return json.dumps([dict(r, split=split) for r in recs])
+
+
+@app.function(cpu=1, memory=4096, timeout=10 * 60, volumes={"/data": data_vol})
+def finalize_rover_set(recs_json: list, meta: dict):
+    import collections
+    base = "/data/vqa/%s" % ROVER_SET
+    data_vol.reload()
+    by = collections.defaultdict(list)
+    for chunk in recs_json:
+        for r in json.loads(chunk):
+            by[r.pop("split")].append(r)
+    for split, rs in by.items():
+        with open(os.path.join(base, split + ".jsonl"), "w") as f:
+            for r in rs:
+                f.write(json.dumps(r) + "\n")
+    counts = {k: len(v) for k, v in by.items()}
+    json.dump(dict(meta, counts=counts), open(os.path.join(base, "meta.json"), "w"), indent=1)
+    open(os.path.join(base, "_READY"), "w").close()      # last: the loaders skip a set without it
+    data_vol.commit()
+    return counts
+
+
+@app.function(cpu=1, timeout=120, volumes={"/data": data_vol})
+def rover_set_exists():
+    return os.path.exists("/data/vqa/%s/_READY" % ROVER_SET)
+
+
+@app.function(cpu=2, memory=4096, timeout=30 * 60)
+def test_frames_job(course: str, seed: int, seconds: float = 60.0):
+    """Held-out frames in probe.py's format (labels + JPEG bytes), for scoring a checkpoint."""
+    _enter()
+    import rover_data
+    fr = rover_data.collect_flight(course, seed, seconds)
+    rows = []
+    blobs = {}
+    for k, f in enumerate(fr):
+        name = "%s-%d-%04d.jpg" % (course, seed, k)
+        blobs[name] = f["jpeg"]
+        rows.append({"frame": name, **{x: f[x] for x in ("course", "seed", "t", "view", "yaw_offset_deg", "visible",
+                                                           "pixels", "bearing_deg", "range_m")}})
+    return json.dumps(rows, default=float), blobs      # JSON: numpy scalars would not unpickle locally
 
 
 def _outdir():
@@ -195,7 +251,8 @@ def probe(frames: str = "/tmp/probe", model: str = "", n_permutations: int = 1, 
     rows = [json.loads(l) for l in open(os.path.join(frames, "labels.jsonl"))]
     blobs = {r["frame"]: open(os.path.join(frames, "frames", r["frame"]), "rb").read() for r in rows}
     preds, summary = (json.loads(x) for x in probe_remote.remote(blobs, rows, model, n_permutations, mode, n_strips))
-    d = os.path.join(HERE, "results", "probe", os.path.basename(os.path.normpath(frames)))
+    d = os.path.join(HERE, "results", "probe", os.path.basename(os.path.normpath(frames)),
+                     (model.strip("/").replace("/ckpt/smolvlm/", "").replace("/", "_") if model else "zero-shot"))
     os.makedirs(d, exist_ok=True)
     tag = "strips%d" % n_strips if mode == "strips" else "perm%d" % n_permutations
     with open(os.path.join(d, "preds-%s.jsonl" % tag), "w") as f:
@@ -203,6 +260,42 @@ def probe(frames: str = "/tmp/probe", model: str = "", n_permutations: int = 1, 
             f.write(json.dumps(p) + "\n")
     json.dump(summary, open(os.path.join(d, "summary-%s.json" % tag), "w"), indent=1)
     print(json.dumps(summary, indent=1))
+
+
+@app.local_entrypoint()
+def build_rover_set(train_seeds: str = "0,1,2,3,4,5,6,7", val_seeds: str = "8,9", courses: str = "classic,pockets,mixed",
+                    seconds: float = 60.0):
+    """Write /data/vqa/drone_rover (create-only) from oracle flights, one Modal CPU job per flight."""
+    if rover_set_exists.remote():
+        raise SystemExit("/data/vqa/%s already exists; refusing to overwrite" % ROVER_SET)
+    jobs = [(c, int(s), sp) for sp, seeds in (("train", train_seeds), ("val", val_seeds))
+            for c in courses.split(",") for s in seeds.split(",")]
+    calls = [collect_job.spawn(c, s, sp, seconds) for c, s, sp in jobs]
+    out = []
+    for (c, s, sp), fc in zip(jobs, calls):
+        out.append(fc.get())
+        print("collected", c, s, sp, flush=True)
+    counts = finalize_rover_set.remote(out, {"source": "jev-drone rover_data.py", "courses": courses,
+                                             "train_seeds": train_seeds, "val_seeds": val_seeds, "seconds": seconds})
+    print("wrote /data/vqa/%s:" % ROVER_SET, counts)
+
+
+@app.local_entrypoint()
+def rover_test_frames(courses: str = "no-climb,no-climb,mixed,mixed", seeds: str = "0,1,20,21",
+                      out: str = "/tmp/rover-test", seconds: float = 60.0):
+    """Held-out frames (a layout never trained on, and unseen seeds) in probe.py's format."""
+    os.makedirs(os.path.join(out, "frames"), exist_ok=True)
+    jobs = list(zip(courses.split(","), [int(s) for s in seeds.split(",")]))
+    rows = []
+    for rs, blobs in test_frames_job.starmap([(c, s, seconds) for c, s in jobs]):
+        rs = json.loads(rs)
+        for name, b in blobs.items():
+            open(os.path.join(out, "frames", name), "wb").write(b)
+        rows += rs
+    with open(os.path.join(out, "labels.jsonl"), "w") as f:
+        for r in rows:
+            f.write(json.dumps(r) + "\n")
+    print(len(rows), "frames,", sum(r["visible"] for r in rows), "with the rover in view ->", out)
 
 
 @app.local_entrypoint()
