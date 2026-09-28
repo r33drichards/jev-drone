@@ -1,0 +1,117 @@
+{
+ "frames": 845,
+ "lost_frames": 326,
+ "occluded_auc_lost": 0.9666149068322981,
+ "occluded_auc_all": 0.9978296497749487,
+ "occluded_true_lost": 322,
+ "occluded_acc_lost": 0.9815950920245399,
+ "occluded_majority_lost": 0.9877300613496932,
+ "reappear_lost": {
+  "n": 326,
+  "acc": 0.9570552147239264,
+  "majority_baseline": 0.40797546012269936,
+  "truth_counts": {
+   "left": 74,
+   "ahead": 119,
+   "right": 133,
+   "behind": 0
+  },
+  "confusion": {
+   "left": {
+    "left": 69,
+    "ahead": 4,
+    "right": 1,
+    "behind": 0
+   },
+   "ahead": {
+    "left": 0,
+    "ahead": 113,
+    "right": 5,
+    "behind": 1
+   },
+   "right": {
+    "left": 0,
+    "ahead": 3,
+    "right": 130,
+    "behind": 0
+   }
+  }
+ },
+ "reappear_visible": {
+  "n": 519,
+  "acc": 0.8304431599229287,
+  "majority_baseline": 0.74373795761079,
+  "truth_counts": {
+   "left": 72,
+   "ahead": 386,
+   "right": 61,
+   "behind": 0
+  },
+  "confusion": {
+   "left": {
+    "left": 29,
+    "ahead": 43,
+    "right": 0,
+    "behind": 0
+   },
+   "ahead": {
+    "left": 7,
+    "ahead": 372,
+    "right": 7,
+    "behind": 0
+   },
+   "right": {
+    "left": 0,
+    "ahead": 31,
+    "right": 30,
+    "behind": 0
+   }
+  }
+ },
+ "reappear_eta": {
+  "n": 326,
+  "acc": 0.8680981595092024,
+  "majority_baseline": 0.3834355828220859,
+  "within_one": 0.9969325153374233,
+  "spearman_expected_vs_true_s": 0.9688632772079612,
+  "mae_s_capped15": 1.018374002807102,
+  "truth_counts": [
+   55,
+   61,
+   125,
+   85
+  ],
+  "pred_counts": [
+   35,
+   73,
+   130,
+   88
+  ]
+ },
+ "maneuver": {
+  "n": 845,
+  "acc": 0.9692307692307692,
+  "majority_baseline": 0.9715976331360947,
+  "climb_recall": 0.0,
+  "climb_precision": 0.0,
+  "climb_auc": 0.8957318311002842,
+  "confusion": {
+   "hold_course": {
+    "hold_course": 819,
+    "gap_left": 0,
+    "gap_right": 0,
+    "climb": 2,
+    "brake": 0,
+    "reacquire": 0
+   },
+   "climb": {
+    "hold_course": 24,
+    "gap_left": 0,
+    "gap_right": 0,
+    "climb": 0,
+    "brake": 0,
+    "reacquire": 0
+   }
+  }
+ }
+}
