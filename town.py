@@ -313,6 +313,11 @@ class TownCourse:
         right answer is always to leave it to the pursuit and the reactive layer."""
         return "hold_course"
 
+    def altitude_target(self, pos):
+        """Cruise everywhere (altitude.py): nothing here needs flying over."""
+        import altitude
+        return altitude.CRUISE
+
     # --- checks ---------------------------------------------------------------------------------
     def clearance(self):
         """The rover centre's smallest horizontal distance to any obstacle over the whole loop, and to what."""

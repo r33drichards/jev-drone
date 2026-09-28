@@ -184,6 +184,17 @@ class Course:
                 return "climb"
         return "hold_course"
 
+    def altitude_target(self, pos):
+        """The altitude to fly here (altitude.py): over a beam from 5 m before it until past it (the capsule
+        is 0.5 m thick; the aircraft's arms reach ~0.4 m), cruise everywhere else. A pocket's front wall is
+        as low as a beam, and flying over it is the trap, so a pocket keeps cruise."""
+        import altitude
+        x = float(pos[0])
+        for kind, sx, side in self.stations:
+            if kind == "beam" and sx - 5.0 <= x <= sx + 1.2:
+                return altitude.OVER_BEAM
+        return altitude.CRUISE
+
 
 POCKET_D = 12.0
 LANE_W = 4.5         # the centre lane between the two pockets: the way round

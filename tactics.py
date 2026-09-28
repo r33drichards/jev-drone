@@ -13,6 +13,7 @@ Laya Vision (https://github.com/r33drichards/laya-vision) run locally, which can
 also see the onboard camera frame.
 """
 import os, threading, queue, time
+import numpy as np
 
 MODEL = "jev-latest"
 LAYA_MODEL = "thaitea/laya-vision"
@@ -314,8 +315,12 @@ class ConstBackend:
     than this, its judgments are not what is flying the course."""
     sees_images = False
 
-    def __init__(self, maneuver="climb", risk=0.93, lost=0.45):
-        self.model = "const:" + maneuver
+    def __init__(self, maneuver="climb", risk=0.93, lost=0.45, wrong_p=0.0, wrong="climb", seed=0):
+        self.model = "const:" + maneuver + ("(wrong=%g@%s)" % (wrong_p, wrong) if wrong_p else "")
+        # `wrong_p`: answer `wrong` instead with this probability (a control for altitude.SimAltitude's
+        # wrong_p: the same rate of false climbs, into the one-shot climb instead of a half-metre step)
+        self.wrong_p, self.wrong = float(wrong_p), wrong
+        self.rng = np.random.default_rng([seed, 6007])
         self.answer = {"maneuver": maneuver, "confidence": 0.0, "probabilities": {m: float(m == maneuver) for m in MANEUVERS},
                        "risk": risk, "target_truly_lost": lost, "source": "laya"}
 
@@ -328,6 +333,8 @@ class ConstBackend:
         if fn is None:
             return dict(self.answer), 0
         mv = fn()
+        if self.wrong_p and self.rng.random() < self.wrong_p:
+            mv = self.wrong
         return dict(self.answer, maneuver=mv, probabilities={m: float(m == mv) for m in MANEUVERS}), 0
 
     def close(self):
@@ -336,7 +343,7 @@ class ConstBackend:
 
 def make_backend(name="jev", **kw):
     if name.startswith("const:"):
-        return ConstBackend(name.split(":", 1)[1])
+        return ConstBackend(name.split(":", 1)[1], **{k: v for k, v in kw.items() if k in ("wrong_p", "wrong", "seed")})
     if name == "jev":
         return JevBackend(**({"model": kw["model"]} if kw.get("model") else {}))
     if name == "laya":

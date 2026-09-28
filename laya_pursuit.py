@@ -488,15 +488,16 @@ class Locator:
 # records' (rover_data.records_v3 / evaluate_v3): {"image": frame, "context": json.dumps(context)}, with the
 # context's keys in V3_CONTEXT_KEYS order, the bearing rounded to 0.1 deg and the range to 0.01 m.
 
-def v3_state(frame, context=None):
-    """The v3 predict state: the frame plus `context` (a dict over probe.V3_CONTEXT_KEYS) as JSON text."""
+def v3_state(frame, context=None, keys=None):
+    """The v3 predict state: the frame plus `context` (a dict over `keys`, default probe.V3_CONTEXT_KEYS) as
+    JSON text, in that key order (the training records' state_text order)."""
     import json
     st = {}
     if frame is not None:
         from PIL import Image
         st["image"] = frame if isinstance(frame, Image.Image) else Image.fromarray(frame)
     ctx = context or {}
-    st["context"] = json.dumps({k: ctx.get(k) for k in probe.V3_CONTEXT_KEYS})
+    st["context"] = json.dumps({k: ctx.get(k) for k in (keys or probe.V3_CONTEXT_KEYS)})
     return st
 
 

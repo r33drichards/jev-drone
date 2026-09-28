@@ -153,6 +153,22 @@ CONFIGS = {
                                           dict({"pursuit": "laya-pursuit", "pursuit_questions": "v2", "reacquire": "laya",
                                                 "pursuit_model": "/ckpt/smolvlm/drone-rover-v2/last"}, **extra))
        for suffix, backend, extra in (("-oracle", "const:oracle", {}), ("-vote", "laya-v3", {"tactics_kw": _V32_VOTE}))},
+    # altitude as a continuous operator (altitude.py): the course's own ascend / descend answers, and the
+    # same rate of false "+1 m" answers against false one-shot climbs (tactics.ConstBackend wrong_p)
+    "code-pursuit-alt": (True, "const:oracle", False, False, {"pursuit": "code", "altitude": "sim"}),
+    **{"code-pursuit-alt-wrong%02d" % int(100 * p): (True, "const:oracle", False, False,
+                                                     {"pursuit": "code", "altitude": "sim", "altitude_wrong_p": p})
+       for p in (0.05, 0.1, 0.2)},
+    **{"code-pursuit-oracle-wrong%02d" % int(100 * p): (True, "const:oracle", False, False,
+                                                        {"pursuit": "code", "tactics_kw": {"wrong_p": p}})
+       for p in (0.05, 0.1, 0.2)},
+    # the altitude operator answered by a checkpoint trained on drone_rover_alt (--model): code pursuit to
+    # isolate it; and all Laya: v2 pursuit, --model reacquires and flies altitude. Tactics hold_course (the
+    # oracle's only other answer is climb, which the altitude operator replaces)
+    "laya-alt": (True, "const:hold_course", False, False, {"pursuit": "code", "altitude": "laya"}),
+    "hybrid-v2pursuit-alt": (True, "const:hold_course", False, False,
+                             {"pursuit": "laya-pursuit", "pursuit_questions": "v2", "reacquire": "laya",
+                              "altitude": "laya", "pursuit_model": "/ckpt/smolvlm/drone-rover-v2/last"}),
     "code-pursuit-simreacq": (True, "const:oracle", False, False, {"pursuit": "code", "reacquire": "sim"}),
     "sim-pursuit-simreacq": (True, "const:oracle", False, False,
                              {"pursuit": "sim-pursuit", "pursuit_noise_deg": 4.0, "pursuit_delay_s": 0.1,
@@ -169,7 +185,7 @@ def _config(name):
 def _needs_gpu(name):
     use_model, backend, _, _, pk = _config(name)
     return ((use_model and not backend.startswith("const:")) or pk.get("pursuit", "code").startswith("laya")
-            or pk.get("reacquire") == "laya")
+            or pk.get("reacquire") == "laya" or pk.get("altitude") == "laya")
 
 
 def _enter():
@@ -211,6 +227,8 @@ def fly(config: str, seed: int, seconds: float, model: str = "", course: str = "
     # reacquisition (hybrid: v2 flies the pursuit, v3.1 answers where a lost rover will reappear)
     pm = pk.pop("pursuit_model", None)
     extra = {"reacquire_model": model or None} if pm and pk.get("reacquire") == "laya" else {}
+    if pm and pk.get("altitude") == "laya":
+        extra["altitude_model"] = model or None
     r = run.episode(seed, seconds, use_jev=use_model, backend=backend, laya_model=model or None,
                     laya_image=img, lockstep=lockstep, course=course, budget=budget or None,
                     pursuit_model=pm or model or None, **extra, **pk)
@@ -288,6 +306,10 @@ def probe_remote(frames: dict, rows: list, model: str = "", n_permutations: int 
     elif mode == "v2":
         preds = probe.evaluate_v2(agent, frames, rows)
         summary = {"sharpen%g" % k: probe.score_v2(preds, k) for k in (1, 2, 3)}
+    elif mode == "alt":
+        import rover_data
+        preds = rover_data.evaluate_alt(agent, frames, rows)
+        summary = {"sharpen%g" % k: rover_data.score_alt(preds, k) for k in (0.5, 1.0, 1.5, 2.0)}
     elif mode == "v3":
         import rover_data
         preds = rover_data.evaluate_v3(agent, frames, rows)
@@ -487,6 +509,7 @@ def test_frames_v3b_job(course: str, seed: int, kind: str):
 # --- v3.2: drone_rover_tac (maneuver: beams vs pocket walls) and drone_rover_town (town perception + reacquisition)
 ROVER_SET_TAC = ROVER_SET + "_tac"
 ROVER_SET_TOWN = ROVER_SET + "_town"
+ROVER_SET_ALT = ROVER_SET + "_alt"       # altitude.py's ascend / descend operator
 
 
 @app.function(cpu=1, timeout=120, volumes={"/data": data_vol})
@@ -518,6 +541,33 @@ def collect_town_job(seed: int, kind: str, split: str, seconds: float = 0.0):
     return json.dumps([dict(r, split=split) for r in recs], default=float)
 
 
+@app.function(cpu=2, memory=4096, timeout=50 * 60, volumes={"/data": data_vol})
+def collect_alt_job(course: str, seed: int, split: str, wander_p: float = 0.3):
+    """One oracle flight with wandering altitude answers -> its frames' images and `altitude` records
+    (rover_data.collect_flight_alt / records_alt)."""
+    _enter()
+    import rover_data
+    frames = rover_data.collect_flight_alt(course, seed, wander_p)
+    recs = rover_data.records_alt(frames, "/data/vqa/%s/images" % ROVER_SET_ALT)
+    data_vol.commit()
+    return json.dumps([dict(r, split=split) for r in recs], default=float)
+
+
+@app.function(cpu=2, memory=4096, timeout=50 * 60)
+def test_frames_alt_job(course: str, seed: int, wander_p: float = 0.3):
+    """Held-out altitude frames in probe.py's format (the records' truth fields + state_text)."""
+    _enter()
+    import rover_data, altitude
+    rows, blobs = [], {}
+    for k, f in enumerate(rover_data.collect_flight_alt(course, seed, wander_p)):
+        name = "alt-%s-%d-%04d.jpg" % (course, seed, k)
+        blobs[name] = f["jpeg"]
+        rows.append({"frame": name, "state_text": json.dumps({q: f["context"].get(q) for q in altitude.CONTEXT_KEYS}),
+                     **{q: f[q] for q in ("course", "seed", "t", "altitude_m", "target_alt_m", "dz_m",
+                                          "station_kind", "pos", "visible")}})
+    return json.dumps(rows, default=float), blobs
+
+
 @app.function(cpu=1, memory=8192, timeout=15 * 60, volumes={"/data": data_vol})
 def finalize_rover_set_v32(name: str, recs_json: list, meta: dict):
     """Balance per split (tac: rover_data.balance_tac; town: balance_reappear), write <split>.jsonl, meta.json,
@@ -542,6 +592,10 @@ def finalize_rover_set_v32(name: str, recs_json: list, meta: dict):
                              "after_balance": rover_data.tac_counts(rs),
                              "by_course": {c: rover_data.tac_counts([r for r in rs if r["course"] == c])["groups"]
                                            for c in sorted({r["course"] for r in rs})}}
+        elif name == ROVER_SET_ALT:
+            rs, before, after = rover_data.balance_alt(rs, seed=seed)
+            report[split] = {"groups_before": before, "groups_after": after,
+                             "by_course": {c: sum(r["course"] == c for r in rs) for c in sorted({r["course"] for r in rs})}}
         else:
             rs = rover_data.balance_reappear(rs, seed=seed)
             report[split] = rover_data.town_counts(rs)
@@ -663,7 +717,7 @@ def probe(frames: str = "/tmp/probe", model: str = "", n_permutations: int = 1, 
     d = os.path.join(HERE, "results", "probe", os.path.basename(os.path.normpath(frames)),
                      (model.strip("/").replace("/ckpt/smolvlm/", "").replace("/", "_") if model else "zero-shot"))
     os.makedirs(d, exist_ok=True)
-    tag = {"strips": "strips%d" % n_strips, "v2": "v2", "v3": "v3"}.get(mode, "perm%d" % n_permutations)
+    tag = {"strips": "strips%d" % n_strips, "v2": "v2", "v3": "v3", "alt": "alt"}.get(mode, "perm%d" % n_permutations)
     with open(os.path.join(d, "preds-%s.jsonl" % tag), "w") as f:
         for p in preds:
             f.write(json.dumps(p) + "\n")
@@ -815,6 +869,40 @@ def _collect_all(fn, jobs):
 # seeds the v3.2 sets never train on: evaluation flights use 0-23 on mixed / no-climb; the tac test set uses
 # mixed 24-27, no-climb 24-25, tactics 0-3; the town test set and town evaluation use town seeds 0-9
 TAC_HELD_OUT = {"mixed": range(0, 28), "no-climb": range(0, 50), "tactics": range(0, 4), "town": range(0, 10)}
+
+
+@app.local_entrypoint()
+def build_rover_set_alt(train_seeds: str = "30,31,32,33,34,35,36,37,38,39,40,41", val_seeds: str = "46,47",
+                        courses: str = "pockets,mixed,tactics", town_train: str = "10,11,12,13", town_val: str = "20",
+                        wander: str = "0.2,0.35"):
+    """Write /data/vqa/drone_rover_alt (create-only): altitude-operator flights (rover_data.collect_flight_alt)
+    at each wander probability, balanced hold <= ascend + descend per split."""
+    if rover_set_ready.remote(ROVER_SET_ALT):
+        raise SystemExit("/data/vqa/%s already exists; refusing to overwrite" % ROVER_SET_ALT)
+    ws = [float(w) for w in wander.split(",")]
+    jobs = [(c, int(s), sp, w) for sp, seeds in (("train", train_seeds), ("val", val_seeds))
+            for c in courses.split(",") for s in seeds.split(",") for w in ws]
+    jobs += [("town", int(s), sp, ws[0]) for sp, seeds in (("train", town_train), ("val", town_val))
+             for s in seeds.split(",") if s]
+    assert not any(s in TAC_HELD_OUT.get(c, ()) for c, s, _, _ in jobs), "held-out seed in the training jobs"
+    out = _collect_all(collect_alt_job, jobs)
+    counts, report = finalize_rover_set_v32.remote(ROVER_SET_ALT, out, {
+        "source": "jev-drone rover_data.collect_flight_alt / records_alt / balance_alt", "courses": courses,
+        "train_seeds": train_seeds, "val_seeds": val_seeds, "town_train": town_train, "town_val": town_val,
+        "wander": wander})
+    print("wrote /data/vqa/%s:" % ROVER_SET_ALT, counts)
+    print(json.dumps(report, indent=1))
+
+
+@app.local_entrypoint()
+def rover_test_frames_alt(courses: str = "mixed,mixed,mixed,no-climb,no-climb,tactics,tactics",
+                          seeds: str = "24,25,26,24,25,0,1", out: str = "/tmp/rover-test-alt"):
+    """Held-out altitude frames: score with probe --mode alt (rover_data.evaluate_alt / score_alt)."""
+    import collections
+    jobs = list(zip(courses.split(","), [int(s) for s in seeds.split(",")]))
+    rows = _write_test(out, test_frames_alt_job.starmap(jobs))
+    print(len(rows), "frames ->", out, dict(collections.Counter(
+        ("ascend" if r["dz_m"] > 0.25 else "descend" if r["dz_m"] < -0.25 else "hold") for r in rows)))
 
 
 @app.local_entrypoint()

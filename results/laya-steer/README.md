@@ -190,3 +190,28 @@ laya-full-v3.2 4/6, laya-pursuit-v3.2-reacq 4/6, hybrid-v2pursuit-v3.2-vote 0/6.
   the same reacquisition). Most failures lose the rover at the first pocket and never find it again.
   In the town the reverse holds: v2 pursuit 0/6 (red scenery, under-turning), v3.2a 4/6. No single
   checkpoint steers well everywhere yet.
+
+## Altitude as a continuous operator (`altitude.py`; `results/laya/20260928-234837`)
+
+The one-shot `climb` answer sends the aircraft to 3.0 m and holds it there for ~3 s, so one wrong call over a
+pocket's low front wall traps it. altitude.py replaces it with a score question: how far to move up or down
+from the current altitude (−1, −0.5, 0, +0.5, +1 m), asked ~3 times a second. Each answer moves the setpoint
+at most 0.5 m, toward (altitude at the frame + answer). Clearing a 2.1 m beam from 1.6 m cruise takes
+several ascends in a row, and a wrong one is taken back by the next answer. The course's own answer is
+courses.Course.altitude_target: 2.9 m from 5 m before a beam until 1.2 m past it, cruise elsewhere.
+
+**Same error rate, both operators** (CPU, code pursuit, 12 seeds on each of mixed, no-climb and pockets).
+The oracle answers are replaced, with the given probability per call, by a false "go up": `climb` for the
+one-shot operator (tactics.ConstBackend wrong_p), "+1 m" for the altitude operator (altitude.SimAltitude).
+
+| false "up" answers | one-shot climb | ascend / descend |
+|---|---|---|
+| 0 | 35/36 | 34/36 |
+| 5% | 16/36 | 34/36 |
+| 10% | 7/36 | 35/36 |
+| 20% | 1/36 | 26/36 |
+
+v3.2a's single-threshold climb made false climbs at about that rate (4.8% of pocket frames at 0.1543).
+The altitude operator tolerates 10% of them with no loss. Next: drone_rover_alt
+(rover_data.collect_flight_alt: oracle flights whose altitude answers are randomly replaced 20-35% of the
+time, so the aircraft visits heights above and below the target), a fine-tune, and flights.

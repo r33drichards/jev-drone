@@ -1037,3 +1037,139 @@ def town_counts(recs):
     out["visible_with_scenery_and_rover"] = sum(1 for r in vis if r["visible"] and r["scenery_px"] >= TOWN_SCENERY_MIN_PX)
     out["frames_by_view"] = dict(collections.Counter(r["view"] for r in vis))
     return out
+
+
+# ---- drone_rover_alt: the altitude operator (altitude.py) ----
+# Oracle-tactics flights where the course's own altitude answers (altitude="sim") are replaced, with
+# probability `wander_p`, by a random level, so the aircraft visits heights off the target: high over
+# pocket walls and open floor (descend), low before beams (ascend), and at the target (hold). Each frame's
+# label is altitude.label(course target, the frame's altitude), trained as a soft score target over
+# altitude.ALT_LEVELS; state_text is JSON over altitude.CONTEXT_KEYS (altitude_m + the v3 context).
+ALT_DENSE_S, ALT_SPARSE_S = 0.25, 0.6        # frame interval near stations / elsewhere
+
+
+def collect_flight_alt(course, seed, wander_p=0.3, seconds=None):
+    import run, flight, courses, altitude
+    from PIL import Image
+    seconds = seconds or V3_SECONDS.get(course, 90.0)
+    c = courses.make(course, seed)
+    stations = getattr(c, "stations", None) or []
+    frames, sightings = [], []
+    st = {"last": -1e9}
+    orig_look = flight.Eye.look
+
+    def near_station(x):
+        return any(k in ("beam", "pocket") and sx - 7.0 <= x <= sx + 3.0 for k, sx, _ in stations)
+
+    def look(self, data, pos, yaw, t):
+        sc = orig_look(self, data, pos, yaw, t)
+        tg = sc["target"]
+        if tg["visible"]:
+            sightings.append((t, float(tg["bearing_deg"]), float(tg["range_m"]), float(yaw)))
+        gap = ALT_DENSE_S if near_station(float(pos[0])) else ALT_SPARSE_S
+        if t - st["last"] < gap - 1e-6 or self.last_rgb is None:
+            return sc
+        st["last"] = t
+        seen = sightings[-1] if sightings else None
+        z = float(pos[2])
+        target = float(c.altitude_target(pos))
+        ctx = {"altitude_m": round(z, 2), "unseen_for_s": 0.0 if tg["visible"] else tg["unseen_for_s"],
+               "last_seen_bearing_deg": None if seen is None else round(_wrap_deg(seen[1] - np.rad2deg(yaw - seen[3])), 1),
+               "last_seen_range_m": None if seen is None else round(seen[2], 2)}
+        buf = io.BytesIO()
+        Image.fromarray(self.last_rgb).save(buf, "JPEG", quality=90)
+        kind = next((k for k, sx, _ in stations if sx - 7.0 <= pos[0] <= sx + 3.0), "none")
+        frames.append({"course": course, "seed": seed, "t": round(t, 2), "jpeg": buf.getvalue(), "context": ctx,
+                       "altitude_m": round(z, 2), "target_alt_m": target, "dz_m": round(altitude.label(target, z), 3),
+                       "station_kind": kind, "pos": [round(float(v), 2) for v in pos], "visible": bool(tg["visible"])})
+        return sc
+
+    flight.Eye.look = look
+    try:
+        run.episode(seed, seconds, use_jev=True, backend="const:oracle", course=course, realtime=False,
+                    altitude="sim", altitude_wrong_p=wander_p, altitude_wrong="random", record_rgb=True)
+    finally:
+        flight.Eye.look = orig_look
+    return frames
+
+
+def alt_group(dz):
+    return "ascend" if dz > 0.25 else ("descend" if dz < -0.25 else "hold")
+
+
+def records_alt(frames, image_dir, rel_prefix="images"):
+    """Write the frames' images and return one `altitude` record per frame (altitude.question(), the frame +
+    state_text over altitude.CONTEXT_KEYS), label = nearest level, target = soft_target over ALT_LEVELS."""
+    import altitude
+    os.makedirs(image_dir, exist_ok=True)
+    q = altitude.question()["altitude"]
+    recs = []
+    for f in frames:
+        stem = "alt-%s-%d-%06.2f" % (f["course"], f["seed"], f["t"])
+        open(os.path.join(image_dir, stem + ".jpg"), "wb").write(f["jpeg"])
+        dz = f["dz_m"]
+        recs.append({"id": stem + "-altitude", "image": "%s/%s.jpg" % (rel_prefix, stem), "question": q,
+                     "state_text": json.dumps({k: f["context"].get(k) for k in altitude.CONTEXT_KEYS}),
+                     "label": int(np.argmin([abs(dz - v) for v in altitude.ALT_LEVELS])),
+                     "target": soft_target(dz, altitude.ALT_LEVELS),
+                     "course": f["course"], "seed": f["seed"], "t": f["t"], "altitude_m": f["altitude_m"],
+                     "target_alt_m": f["target_alt_m"], "dz_m": dz, "station_kind": f["station_kind"],
+                     "pos": f["pos"], "visible": f["visible"]})
+    return recs
+
+
+def balance_alt(recs, seed=0):
+    """Subsample (seeded) the hold records to at most the ascend + descend count. -> (records, before, after)."""
+    groups = {"ascend": [], "descend": [], "hold": []}
+    for i, r in enumerate(recs):
+        groups[alt_group(r["dz_m"])].append(i)
+    before = {k: len(v) for k, v in groups.items()}
+    cap = before["ascend"] + before["descend"]
+    keep = set(groups["ascend"]) | set(groups["descend"])
+    h = groups["hold"]
+    keep |= set(h) if len(h) <= cap else set(np.random.default_rng(seed).choice(h, cap, replace=False).tolist())
+    out = [r for i, r in enumerate(recs) if i in keep]
+    return out, before, {k: sum(alt_group(r["dz_m"]) == k for r in out) for k in groups}
+
+
+def evaluate_alt(agent, frames, rows):
+    """altitude.question() on each held-out frame -> preds with the level probabilities."""
+    import altitude
+    from PIL import Image
+    qs = altitude.question()
+    preds = []
+    for r in rows:
+        img = Image.open(io.BytesIO(frames[r["frame"]])).convert("RGB")
+        a = agent.predict({"image": img, "context": r["state_text"]}, qs)["answers"]["altitude"]
+        preds.append(dict(r, alt_probs=[float(a["probabilities"][str(i)]) for i in range(len(altitude.ALT_LEVELS))]))
+    return preds
+
+
+def score_alt(preds, sharpen=1.0):
+    """Read-out error and the direction of the answer by group, the false-ascend rate at pockets (the trap)
+    and the ascend rate before beams."""
+    import altitude
+    est = np.array([altitude.read(p["alt_probs"], sharpen) for p in preds])
+    dz = np.array([p["dz_m"] for p in preds])
+    grp = [alt_group(v) for v in dz]
+    out = {"n": len(preds), "dz_mae_m": round(float(np.mean(np.abs(est - dz))), 3),
+           "dz_mae_const_hold_m": round(float(np.mean(np.abs(dz))), 3),
+           "spearman": round(float(_spearman(est, dz)), 3) if len(preds) > 2 else None}
+    for g in ("ascend", "descend", "hold"):
+        m = np.array([x == g for x in grp])
+        if m.any():
+            e = est[m]
+            out[g] = {"n": int(m.sum()), "mae_m": round(float(np.mean(np.abs(e - dz[m]))), 3),
+                      "said_ascend": round(float(np.mean(e > 0.25)), 3), "said_descend": round(float(np.mean(e < -0.25)), 3)}
+    pk = np.array([p["station_kind"] == "pocket" and p["altitude_m"] < 2.0 for p in preds])
+    if pk.any():
+        out["pocket_low_false_ascend"] = round(float(np.mean(est[pk] > 0.25)), 3)
+    bm = np.array([p["station_kind"] == "beam" and p["dz_m"] > 0.25 for p in preds])
+    if bm.any():
+        out["beam_ascend_recall"] = round(float(np.mean(est[bm] > 0.25)), 3)
+    return out
+
+
+def _spearman(a, b):
+    ra, rb = np.argsort(np.argsort(a)), np.argsort(np.argsort(b))
+    return float(np.corrcoef(ra, rb)[0, 1])

@@ -239,7 +239,7 @@ class Guidance:
         return self.eye.sector_bearing(best)
 
     def __call__(self, scene, judg, yaw, z, use_jev, fresh=False, t=0.0, pos=None, fix=None, vel=None,
-                 reappear=None):
+                 reappear=None, alt_sp=None):
         """`fix`: the target as another perception sees it (laya_pursuit.Locator), in the shape of
         scene["target"]; it replaces the camera's for pursuit only. Its range_m is the code's, and
         None when only the model sees the rover: then hold the not-visible speed -- except with a
@@ -291,8 +291,11 @@ class Guidance:
             fwd = self.speed_law(t, bool(tgt["visible"]), tgt["range_m"], tgt.get("t_est"), tgt["bearing_deg"],
                                  yaw, vel)
 
+        # altitude: the Altimeter's setpoint when one flies it (altitude.py; `climb` is then ignored), else
+        # cruise, or CLIMB_ALT for the climb hold
+        alt_ext = alt_sp
         self.climb_hold = max(0, self.climb_hold - 1)
-        alt_sp = CLIMB_ALT if self.climb_hold else CRUISE_ALT
+        alt_sp = alt_ext if alt_ext is not None else (CLIMB_ALT if self.climb_hold else CRUISE_ALT)
 
         # --- reactive layer: turn away from the worst threat and slow down --------
         left_room = min(sec["far_left"], sec["left"])
@@ -340,7 +343,7 @@ class Guidance:
                     yaw_rel = self._open_side(sec, left)
                 fwd = max(fwd, 0.7)
             # only commit to going over it if there is demonstrably clear air up there
-            elif (mv == "climb" and scene["sectors_blocked"] >= 4
+            elif (mv == "climb" and alt_ext is None and scene["sectors_blocked"] >= 4
                   and scene["free_ahead_above_m"] > 2.2 * scene["free_ahead_level_m"]):
                 self.climb_hold = THRESH["climb_steps"]
                 alt_sp = CLIMB_ALT
@@ -413,7 +416,8 @@ def episode(seed=0, seconds=35.0, use_jev=True, video=None, hz=None, budget=None
             pursuit_questions="v1", pursuit_sharpen=None, pursuit_gain=None, pursuit_range=None,
             speed_law="auto", speed_params=None, guide_tune=None, reacquire=None, reacquire_model=None,
             reacquire_hz=3.0, reacquire_params=None, reacquire_wrong_p=0.0, reacquire_delay_s=0.0,
-            tactics_kw=None, appearance=None):
+            tactics_kw=None, appearance=None, altitude=None, altitude_model=None, altitude_hz=3.0,
+            altitude_wrong_p=0.0, altitude_wrong=1.0, altitude_sharpen=1.0, record_rgb=False):
     """`record`: a list to append a snapshot to every 0.2 s of sim time (pose, obstacles,
     judgment, and the camera frame the model saw), for rendering after the flight
     (flightgif.py). Cheap, so the flight stays real time.
@@ -450,6 +454,11 @@ def episode(seed=0, seconds=35.0, use_jev=True, video=None, hz=None, budget=None
     context goes to laya_pursuit.Reacquirer at most `reacquire_hz` times a second, and Guidance turns toward
     the predicted side instead of holding course or the extrapolated search (run.REACQ_DEFAULTS,
     Guidance._reappear_heading).
+
+    `altitude`: None (default: cruise, and CLIMB_ALT on a climb), "sim" (the course's altitude_target, with
+    `altitude_wrong_p` answers of `altitude_wrong` m instead) or "laya" (`altitude_model`, default
+    pursuit_model or laya_model, read with `altitude_sharpen`): altitude.Altimeter asks how far to move up or
+    down at most `altitude_hz` times a second and flies the setpoint; a `climb` maneuver is then ignored.
 
     `appearance`: realism.py's real-world look (textures, sky, scanned clutter) for a courses.py course, as a
     spec ("real", "tex+sky+c20", ...) or dict; None (default) leaves the scene as it is. A course-name suffix
@@ -489,7 +498,8 @@ def episode(seed=0, seconds=35.0, use_jev=True, video=None, hz=None, budget=None
     if reacquire not in (None, "sim", "laya"):
         raise ValueError("reacquire must be None, sim or laya, got %r" % (reacquire,))
     eye = flight.Eye(m, rgb_size=(512, 384) if ((use_jev and (laya_image or backend == "laya-v3"))
-                                                or pursuit.startswith("laya") or reacquire == "laya") else None)
+                                                or pursuit.startswith("laya") or reacquire == "laya"
+                                                or altitude == "laya" or record_rgb) else None)
     model_range = pursuit in ("laya-pursuit", "sim-pursuit")      # the pursuit's range is a model's
     if speed_law not in ("auto", "robust", "code"):
         raise ValueError("speed_law must be auto, robust or code, got %r" % speed_law)
@@ -512,7 +522,8 @@ def episode(seed=0, seconds=35.0, use_jev=True, video=None, hz=None, budget=None
         from tactics import Tactician, DEFAULT, make_backend
         be = make_backend(backend, model=laya_model if backend in ("laya", "laya-v3") else None,  # "const:<maneuver>" is a control
                           **({"use_image": laya_image} if backend == "laya" else {}),
-                          **(dict(tactics_kw or {}) if backend == "laya-v3" else {}))
+                          **(dict(tactics_kw or {}) if backend == "laya-v3" else {}),
+                          **(dict({"seed": seed}, **(tactics_kw or {})) if backend.startswith("const:") else {}))
         tac = Tactician(backend=be, lockstep=lockstep,
                         **{k: v for k, v in (("hz", hz), ("budget", budget)) if v})
         if backend == "const:oracle":
@@ -526,7 +537,7 @@ def episode(seed=0, seconds=35.0, use_jev=True, video=None, hz=None, budget=None
     # the v3 context (laya_pursuit.LastSeen) for the v3 tactics and for reacquisition, from the pursuit source
     wants_ctx = bool(tac) and getattr(tac.backend, "wants_context", False)
     seen = reacq = rp = None
-    if wants_ctx or reacquire:
+    if wants_ctx or reacquire or altitude == "laya":
         import laya_pursuit
         seen = laya_pursuit.LastSeen()
     if reacquire:
@@ -536,6 +547,18 @@ def episode(seed=0, seconds=35.0, use_jev=True, video=None, hz=None, budget=None
             hz=reacquire_hz,
             truth=lambda: laya_pursuit.reappear_truth(m, d, rover_at, t, bool(scene["target"]["visible"])))
     reacq_after = guide.reacq["after_s"] if reacquire else None
+    altim = alt_now = None
+    if altitude is not None:
+        import altitude as altmod
+        target_fn = getattr(c, "altitude_target", None) if course != "classic" else None
+        if target_fn is None:
+            raise ValueError("altitude needs a courses.py / town.py course (its altitude_target)")
+        altim = altmod.Altimeter(
+            altmod.make_backend(altitude, target_fn=lambda: target_fn(d.qpos[:3]),
+                                model=altitude_model or pursuit_model or laya_model, wrong_p=altitude_wrong_p,
+                                wrong=altitude_wrong, sharpen=altitude_sharpen, seed=seed),
+            hz=altitude_hz, truth=lambda: target_fn(d.qpos[:3]), start=CRUISE_ALT)
+        alt_track = []
 
     writer = cam = big = None
     if video:
@@ -604,6 +627,14 @@ def episode(seed=0, seconds=35.0, use_jev=True, video=None, hz=None, budget=None
                     reacq.offer(eye.last_rgb, t, yaw, seen.context(yaw, src))
                     if reacq.lockstep and realtime:
                         wall0 += time.time() - t_off
+            if altim is not None:
+                actx = {"altitude_m": round(float(pos[2]), 2)}
+                if seen is not None:
+                    actx.update(seen.context(yaw, fix if loc else scene["target"]))
+                t_off = time.time()
+                altim.offer(eye.last_rgb, t, actx)
+                if altim.lockstep and realtime:
+                    wall0 += time.time() - t_off
 
         if i % 10 == 0 and scene:                        # 50 Hz guidance
             if tac:
@@ -631,11 +662,13 @@ def episode(seed=0, seconds=35.0, use_jev=True, video=None, hz=None, budget=None
                 seen.update(yaw, fix)
             if reacq is not None:
                 rp = reacq.read(t)
-                v_des, yaw_cmd, acted, reflex = guide(scene, judg, yaw, pos[2], use_jev, fresh, t, pos, fix,
-                                                      d.qvel[:3].copy() if law is not None else None, reappear=rp)
-            else:
-                v_des, yaw_cmd, acted, reflex = guide(scene, judg, yaw, pos[2], use_jev, fresh, t, pos, fix,
-                                                      d.qvel[:3].copy() if law is not None else None)
+            if altim is not None:
+                alt_now = altim.read(t)
+                if i % 500 == 0:
+                    alt_track.append((round(t, 1), round(float(pos[0]), 1), round(float(pos[2]), 2), round(alt_now, 2)))
+            v_des, yaw_cmd, acted, reflex = guide(scene, judg, yaw, pos[2], use_jev, fresh, t, pos, fix,
+                                                  d.qvel[:3].copy() if law is not None else None,
+                                                  reappear=rp, alt_sp=alt_now)
             if TRACE >= 2 and i % 250 == 0:
                 sec = scene["sector_range_m"]
                 print("    t=%5.1f pos=(%5.1f,%5.1f,%4.1f) yaw=%4.0f mv=%-11s commit=%-11s reflex=%d v=(%4.1f,%4.1f,%4.1f)"
@@ -812,6 +845,9 @@ def episode(seed=0, seconds=35.0, use_jev=True, video=None, hz=None, budget=None
                    pursuit_p90_latency_s=st["p90_latency_s"], locator=st)
         if model_range:
             out["pursuit_range_mae_m"] = st["range_mae_m"]
+    if altim is not None:
+        out.update(altitude=altitude, altimeter=altim.stats(), altitude_track=alt_track)
+        altim.close()
     if lap is not None:              # looped course: laps followed; finished = a lap, still tracking at the end
         lap.report(out, standoffs)
     return out
