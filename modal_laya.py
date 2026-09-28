@@ -105,7 +105,8 @@ def scenes_remote(model: str = "", variants=(("full budgets, no image", []),)):
     return text, rows
 
 
-@app.function(gpu=["L4", "A10G"], cpu=4, memory=16384, timeout=60 * 60, volumes={"/cache/hf": hf_vol})
+@app.function(gpu=["L4", "A10G"], cpu=4, memory=16384, timeout=60 * 60,
+              volumes={"/cache/hf": hf_vol, "/ckpt": ckpt_vol.read_only()})
 def fly(config: str, seed: int, seconds: float, model: str = "", course: str = "classic", budget: int = 0):
     _enter()
     import run
@@ -137,7 +138,8 @@ def render_course(course: str, seed: int):
     return courses.render(course, seed, "/root/jev")
 
 
-@app.function(gpu=["L4", "A10G"], cpu=4, memory=16384, timeout=60 * 60, volumes={"/cache/hf": hf_vol})
+@app.function(gpu=["L4", "A10G"], cpu=4, memory=16384, timeout=60 * 60,
+              volumes={"/cache/hf": hf_vol, "/ckpt": ckpt_vol.read_only()})
 def fly_gif(config: str, seed: int, seconds: float, course: str, budget: int = 0, model: str = ""):
     """fly(), recording the flight, then render it as a GIF (flightgif.py) after the flight ends."""
     _enter()
