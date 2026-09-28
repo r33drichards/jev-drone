@@ -256,7 +256,8 @@ def make_locator_backend(mode, model=None, threshold=0.5, noise_deg=0.0, delay_s
     if mode == "laya-frame":
         return FrameBackend(model, threshold, sharpen, gain, questions=questions)
     if mode == "laya-pursuit":
-        return FrameBackend(model, threshold, sharpen, gain, speed=True, questions=questions)
+        return FrameBackend(model, threshold, sharpen, gain, speed=True, questions=questions,
+                            range_sharpen=range_kw.get("range_sharpen"))
     raise ValueError("pursuit locator must be sim, sim-pursuit, laya-strips, laya-frame or laya-pursuit, got %r" % mode)
 
 

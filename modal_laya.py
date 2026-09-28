@@ -108,6 +108,16 @@ CONFIGS = {
            ("laya-full-v3", "laya-v3", {"pursuit": "laya-pursuit", "pursuit_questions": "v2"}, True),
            ("laya-pursuit-v3-reacq", "const:oracle", {"pursuit": "laya-pursuit", "pursuit_questions": "v2"}, True),
            ("laya-pursuit-v3", "const:oracle", {"pursuit": "laya-pursuit", "pursuit_questions": "v2"}, False),
+           # drone-rover-v3.1's score temperature is 0.74 (v2's: 2.10), so its level probabilities are
+           # sharp: the v2 read-out (power 2) snapped 60% of steer estimates onto a level centre and the
+           # heading moved in 15-deg jumps (in-flight bearing error 9.7 deg vs 5.6 for v2). Softer powers
+           # (steer 0.6, range 0.75) were best on held-out frames: 5.2-5.5 deg, 0.43 m, ~25% snapped.
+           ("laya-full-v3-soft", "laya-v3", {"pursuit": "laya-pursuit", "pursuit_questions": "v2",
+                                             "pursuit_sharpen": 0.6, "pursuit_range": {"range_sharpen": 0.75}}, True),
+           ("laya-pursuit-v3-reacq-soft", "const:oracle", {"pursuit": "laya-pursuit", "pursuit_questions": "v2",
+                                             "pursuit_sharpen": 0.6, "pursuit_range": {"range_sharpen": 0.75}}, True),
+           ("laya-pursuit-v3-soft", "const:oracle", {"pursuit": "laya-pursuit", "pursuit_questions": "v2",
+                                             "pursuit_sharpen": 0.6, "pursuit_range": {"range_sharpen": 0.75}}, False),
            ("laya-tactics-v3", "laya-v3", {"pursuit": "code"}, False),
            ("laya-tactics-v3-argmax", "laya-v3", {"pursuit": "code", "tactics_kw": {"climb_p": None}}, False))},
     # CPU controls: the reacquisition logic on the simulator's own v3 label (laya_pursuit.SimReappear), with
