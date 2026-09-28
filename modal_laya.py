@@ -96,6 +96,26 @@ CONFIGS = {
                                                    "pursuit_delay_s": 0.1, "pursuit_range": rk}, **extra))
        for noisy, rk in (("", {"range_noise_m": 0.45, "range_offset_m": -0.1}), ("-noisy", {"range_noise_m": 1.0}))
        for suffix, extra in (("", {}), ("-oldlaw", {"speed_law": "code"}))},
+    # drone-rover-v3 checkpoints (pass one with --model, e.g. /ckpt/smolvlm/drone-rover-v3.1/best; one loaded
+    # copy serves pursuit, tactics and reacquisition): tactics = tactics.LayaV3Backend, the checkpoint's
+    # `maneuver` from the frame + v3 context, climb whenever P(climb) >= tactics.V3_CLIMB_P (0.12; argmax
+    # almost never says climb), risk and target_truly_lost fixed at the oracle control's values; reacquire =
+    # while the pursuit source has lost the rover > 1 s, ask the checkpoint where it will reappear (<= 3 Hz)
+    # and turn that way unless it says occluded (run.REACQ_DEFAULTS, laya_pursuit.Reacquirer). Pursuit asks
+    # the v2 perception questions, which v3 keeps. -argmax: climb only when it is the argmax.
+    **{name: (True, backend, backend == "laya-v3", False, dict(pk, **({"reacquire": "laya"} if rq else {})))
+       for name, backend, pk, rq in (
+           ("laya-full-v3", "laya-v3", {"pursuit": "laya-pursuit", "pursuit_questions": "v2"}, True),
+           ("laya-pursuit-v3-reacq", "const:oracle", {"pursuit": "laya-pursuit", "pursuit_questions": "v2"}, True),
+           ("laya-pursuit-v3", "const:oracle", {"pursuit": "laya-pursuit", "pursuit_questions": "v2"}, False),
+           ("laya-tactics-v3", "laya-v3", {"pursuit": "code"}, False),
+           ("laya-tactics-v3-argmax", "laya-v3", {"pursuit": "code", "tactics_kw": {"climb_p": None}}, False))},
+    # CPU controls: the reacquisition logic on the simulator's own v3 label (laya_pursuit.SimReappear), with
+    # code pursuit and with the sim stand-in for laya-pursuit; compare with code-pursuit-oracle / sim-pursuit
+    "code-pursuit-simreacq": (True, "const:oracle", False, False, {"pursuit": "code", "reacquire": "sim"}),
+    "sim-pursuit-simreacq": (True, "const:oracle", False, False,
+                             {"pursuit": "sim-pursuit", "pursuit_noise_deg": 4.0, "pursuit_delay_s": 0.1,
+                              "pursuit_range": {"range_noise_m": 0.45, "range_offset_m": -0.1}, "reacquire": "sim"}),
 }
 
 
@@ -107,7 +127,8 @@ def _config(name):
 
 def _needs_gpu(name):
     use_model, backend, _, _, pk = _config(name)
-    return (use_model and not backend.startswith("const:")) or pk.get("pursuit", "code").startswith("laya")
+    return ((use_model and not backend.startswith("const:")) or pk.get("pursuit", "code").startswith("laya")
+            or pk.get("reacquire") == "laya")
 
 
 def _enter():
@@ -221,6 +242,10 @@ def probe_remote(frames: dict, rows: list, model: str = "", n_permutations: int 
     elif mode == "v2":
         preds = probe.evaluate_v2(agent, frames, rows)
         summary = {"sharpen%g" % k: probe.score_v2(preds, k) for k in (1, 2, 3)}
+    elif mode == "v3":
+        import rover_data
+        preds = rover_data.evaluate_v3(agent, frames, rows)
+        summary = rover_data.score_v3(preds)
     else:
         preds = probe.evaluate(agent, frames, rows, n_permutations)
         summary = probe.score(preds)
@@ -284,6 +309,133 @@ def build_rover_set_v2_remote():
     open(os.path.join(base, "_READY"), "w").close()
     data_vol.commit()
     return counts
+
+
+# --- drone_rover_v3: reacquisition (occluded / reappear / reappear_eta) and tactics (maneuver) --------------
+ROVER_SET_V3 = ROVER_SET + "_v3"
+
+
+@app.function(cpu=2, memory=4096, timeout=40 * 60, volumes={"/data": data_vol})
+def collect_v3_job(course: str, seed: int, split: str, seconds: float = 0.0):
+    """One flight -> its v3 frames' images on the datasets volume, and their records (rover_data.records_v3)."""
+    _enter()
+    import rover_data
+    frames = rover_data.collect_flight_v3(course, seed, seconds or None)
+    recs = rover_data.records_v3(frames, "/data/vqa/%s/images" % ROVER_SET_V3)
+    data_vol.commit()
+    return json.dumps([dict(r, split=split) for r in recs], default=float)
+
+
+@app.function(cpu=1, memory=4096, timeout=10 * 60, volumes={"/data": data_vol})
+def finalize_rover_set_v3(recs_json: list, meta: dict):
+    """Balance maneuver per split (rover_data.balance_maneuver), write <split>.jsonl, meta.json, _READY last."""
+    _enter()
+    import collections, rover_data
+    base = "/data/vqa/%s" % ROVER_SET_V3
+    data_vol.reload()
+    if os.path.exists(os.path.join(base, "_READY")):
+        raise SystemExit("%s already exists; refusing to overwrite" % base)
+    by = collections.defaultdict(list)
+    for chunk in recs_json:
+        for r in json.loads(chunk):
+            by[r.pop("split")].append(r)
+    counts, labels = {}, {}
+    for split, rs in sorted(by.items()):
+        rs = rover_data.balance_maneuver(rs, seed=0 if split == "train" else 1)
+        with open(os.path.join(base, split + ".jsonl"), "w") as f:
+            for r in rs:
+                f.write(json.dumps(r) + "\n")
+        counts[split] = len(rs)
+        c = collections.Counter("%s=%s" % (r["id"].rsplit("-", 1)[1], r["label"]) for r in rs)
+        labels[split] = dict(sorted(c.items()))
+    json.dump(dict(meta, counts=counts, labels=labels), open(os.path.join(base, "meta.json"), "w"), indent=1)
+    open(os.path.join(base, "_READY"), "w").close()      # last: the loaders skip a set without it
+    data_vol.commit()
+    return counts, labels
+
+
+@app.function(cpu=1, timeout=120, volumes={"/data": data_vol})
+def rover_set_v3_exists():
+    return os.path.exists("/data/vqa/%s/_READY" % ROVER_SET_V3)
+
+
+@app.function(cpu=2, memory=4096, timeout=40 * 60)
+def test_frames_v3_job(course: str, seed: int, seconds: float = 0.0):
+    """Held-out v3 frames in probe.py's format: every snapshot with all its v3 truth (rover_data.v3_frame_labels)."""
+    _enter()
+    import rover_data
+    fr = rover_data.collect_flight_v3(course, seed, seconds or None)
+    rows, blobs = [], {}
+    for k, f in enumerate(fr):
+        name = "v3-%s-%d-%04d.jpg" % (course, seed, k)
+        blobs[name] = f["jpeg"]
+        rows.append(dict(frame=name, **rover_data.v3_frame_labels(f)))
+    return json.dumps(rows, default=float), blobs
+
+
+# --- drone_rover_v3b: more "rover lost / behind" examples in v3's format (rover_data.collect_flight_v3b) --------
+ROVER_SET_V3B = ROVER_SET + "_v3b"
+
+
+@app.function(cpu=2, memory=4096, timeout=50 * 60, volumes={"/data": data_vol})
+def collect_v3b_job(course: str, seed: int, kind: str, split: str):
+    """One flight -> its v3b frames' images on the datasets volume, and their records (rover_data.records_v3)."""
+    _enter()
+    import rover_data
+    frames = rover_data.collect_flight_v3b(course, seed, kind)
+    recs = rover_data.records_v3(frames, "/data/vqa/%s/images" % ROVER_SET_V3B)
+    data_vol.commit()
+    return json.dumps([dict(r, split=split) for r in recs], default=float)
+
+
+@app.function(cpu=1, memory=4096, timeout=10 * 60, volumes={"/data": data_vol})
+def finalize_rover_set_v3b(recs_json: list, meta: dict):
+    """Balance maneuver (rover_data.balance_maneuver) and cap reappear=ahead (balance_reappear) per split,
+    write <split>.jsonl, meta.json, _READY last."""
+    _enter()
+    import collections, rover_data
+    base = "/data/vqa/%s" % ROVER_SET_V3B
+    data_vol.reload()
+    if os.path.exists(os.path.join(base, "_READY")):
+        raise SystemExit("%s already exists; refusing to overwrite" % base)
+    by = collections.defaultdict(list)
+    for chunk in recs_json:
+        for r in json.loads(chunk):
+            by[r.pop("split")].append(r)
+    counts, labels, named = {}, {}, {}
+    for split, rs in sorted(by.items()):
+        rs = rover_data.balance_maneuver(rs, seed=0 if split == "train" else 1)
+        rs = rover_data.balance_reappear(rs, seed=0 if split == "train" else 1)
+        with open(os.path.join(base, split + ".jsonl"), "w") as f:
+            for r in rs:
+                f.write(json.dumps(r) + "\n")
+        counts[split] = len(rs)
+        c = collections.Counter("%s=%s" % (r["id"].rsplit("-", 1)[1], r["label"]) for r in rs)
+        labels[split] = dict(sorted(c.items()))
+        named[split] = rover_data.label_counts(rs)
+    json.dump(dict(meta, counts=counts, labels=labels, label_names=named), open(os.path.join(base, "meta.json"), "w"),
+              indent=1)
+    open(os.path.join(base, "_READY"), "w").close()      # last: the loaders skip a set without it
+    data_vol.commit()
+    return counts, named
+
+
+@app.function(cpu=1, timeout=120, volumes={"/data": data_vol})
+def rover_set_v3b_exists():
+    return os.path.exists("/data/vqa/%s/_READY" % ROVER_SET_V3B)
+
+
+@app.function(cpu=2, memory=4096, timeout=50 * 60)
+def test_frames_v3b_job(course: str, seed: int, kind: str):
+    """Held-out v3b frames in probe.py's format (rover_data.v3b_test_row), with their JPEG bytes."""
+    _enter()
+    import rover_data
+    rows, blobs = [], {}
+    for f in rover_data.collect_flight_v3b(course, seed, kind):
+        name = f["stem"] + ".jpg"
+        blobs[name] = f["jpeg"]
+        rows.append(rover_data.v3b_test_row(f, name))
+    return json.dumps(rows, default=float), blobs
 
 
 @app.function(cpu=1, timeout=120, volumes={"/data": data_vol})
@@ -368,7 +520,7 @@ def probe(frames: str = "/tmp/probe", model: str = "", n_permutations: int = 1, 
     d = os.path.join(HERE, "results", "probe", os.path.basename(os.path.normpath(frames)),
                      (model.strip("/").replace("/ckpt/smolvlm/", "").replace("/", "_") if model else "zero-shot"))
     os.makedirs(d, exist_ok=True)
-    tag = {"strips": "strips%d" % n_strips, "v2": "v2"}.get(mode, "perm%d" % n_permutations)
+    tag = {"strips": "strips%d" % n_strips, "v2": "v2", "v3": "v3"}.get(mode, "perm%d" % n_permutations)
     with open(os.path.join(d, "preds-%s.jsonl" % tag), "w") as f:
         for p in preds:
             f.write(json.dumps(p) + "\n")
@@ -397,6 +549,107 @@ def build_rover_set(train_seeds: str = "0,1,2,3,4,5,6,7", val_seeds: str = "8,9"
 @app.local_entrypoint()
 def build_rover_set_v2():
     print("wrote /data/vqa/%s_v2:" % ROVER_SET, build_rover_set_v2_remote.remote())
+
+
+@app.local_entrypoint()
+def build_rover_set_v3(train_seeds: str = "0,1,2,3,4,5,6,7", val_seeds: str = "8,9",
+                       courses: str = "pockets,mixed,classic"):
+    """Write /data/vqa/drone_rover_v3 (create-only) from new flights, one Modal CPU job per flight: oracle
+    tactics on pockets / mixed, const:climb on classic (rover_data.collect_flight_v3). no-climb and seeds >= 20
+    are held out for evaluation (rover_test_frames_v3)."""
+    if rover_set_v3_exists.remote():
+        raise SystemExit("/data/vqa/%s already exists; refusing to overwrite" % ROVER_SET_V3)
+    jobs = [(c, int(s), sp) for sp, seeds in (("train", train_seeds), ("val", val_seeds))
+            for c in courses.split(",") for s in seeds.split(",")]
+    assert not any(c == "no-climb" or s >= 20 for c, s, _ in jobs), "no-climb and seeds >= 20 are held out"
+    calls = [collect_v3_job.spawn(c, s, sp) for c, s, sp in jobs]
+    out = []
+    for (c, s, sp), fc in zip(jobs, calls):
+        out.append(fc.get())
+        print("collected", c, s, sp, len(json.loads(out[-1])), "records", flush=True)
+    counts, labels = finalize_rover_set_v3.remote(out, {"source": "jev-drone rover_data.collect_flight_v3 / records_v3",
+                                                        "courses": courses, "train_seeds": train_seeds,
+                                                        "val_seeds": val_seeds})
+    print("wrote /data/vqa/%s:" % ROVER_SET_V3, counts)
+    print(json.dumps(labels, indent=1))
+
+
+@app.local_entrypoint()
+def rover_test_frames_v3(courses: str = "no-climb,no-climb,mixed,mixed", seeds: str = "0,1,20,21",
+                         out: str = "/tmp/rover-test-v3"):
+    """Held-out v3 frames (the unseen no-climb layout, unseen mixed seeds) in probe.py's format, with state_text
+    and every v3 truth field: score with rover_data.evaluate_v3 / score_v3."""
+    os.makedirs(os.path.join(out, "frames"), exist_ok=True)
+    jobs = list(zip(courses.split(","), [int(s) for s in seeds.split(",")]))
+    rows = []
+    for rs, blobs in test_frames_v3_job.starmap([(c, s) for c, s in jobs]):
+        for name, b in blobs.items():
+            open(os.path.join(out, "frames", name), "wb").write(b)
+        rows += json.loads(rs)
+    with open(os.path.join(out, "labels.jsonl"), "w") as f:
+        for r in rows:
+            f.write(json.dumps(r) + "\n")
+    print(len(rows), "frames,", sum(not r["visible"] for r in rows), "with the rover out of sight ->", out)
+
+
+@app.local_entrypoint()
+def build_rover_set_v3b(train_seeds: str = "10,11,12,13,14,15,16,17", val_seeds: str = "18,19",
+                        rot_courses: str = "pockets,mixed,classic", fail_courses: str = "pockets,mixed",
+                        fail_kinds: str = "sim6,sim10,simr"):
+    """Write /data/vqa/drone_rover_v3b (create-only), one Modal CPU job per flight: rotated views of oracle
+    flights on rot_courses, and frames around losses on failure flights (rover_data.V3B_FAILURE) on fail_courses
+    (rover_data.collect_flight_v3b). Seeds 0-9 are drone_rover_v3's; no-climb and seeds >= 20 are held out
+    (rover_test_frames_v3b)."""
+    if rover_set_v3b_exists.remote():
+        raise SystemExit("/data/vqa/%s already exists; refusing to overwrite" % ROVER_SET_V3B)
+    jobs = [(c, int(s), k, sp) for sp, seeds in (("train", train_seeds), ("val", val_seeds)) for s in seeds.split(",")
+            for c, k in [(c, "rotated") for c in rot_courses.split(",")]
+            + [(c, k) for c in fail_courses.split(",") for k in fail_kinds.split(",")]]
+    assert not any(c == "no-climb" or s >= 20 for c, s, _, _ in jobs), "no-climb and seeds >= 20 are held out"
+    calls = [collect_v3b_job.spawn(*j) for j in jobs]
+    out = []
+    for j, fc in zip(jobs, calls):
+        r = _get(fc)
+        if isinstance(r, Exception):
+            print("FAILED", j, repr(r)[:300], flush=True)
+            continue
+        out.append(r)
+        print("collected", *j, len(json.loads(r)), "records", flush=True)
+    if len(out) < len(jobs):
+        raise SystemExit("%d of %d flights failed; not finalizing (images stay; rerun after a fix)"
+                         % (len(jobs) - len(out), len(jobs)))
+    counts, named = finalize_rover_set_v3b.remote(out, {
+        "source": "jev-drone rover_data.collect_flight_v3b / records_v3", "rot_courses": rot_courses,
+        "fail_courses": fail_courses, "fail_kinds": fail_kinds, "train_seeds": train_seeds, "val_seeds": val_seeds})
+    print("wrote /data/vqa/%s:" % ROVER_SET_V3B, counts)
+    print(json.dumps(named, indent=1))
+
+
+@app.local_entrypoint()
+def rover_test_frames_v3b(courses: str = "no-climb,no-climb,no-climb,mixed,mixed,mixed", seeds: str = "0,1,2,20,21,22",
+                          kinds: str = "rotated,sim6,sim10,simr", out: str = "/tmp/rover-test-v3b"):
+    """Held-out v3b frames (rotated views + failure-flight losses on the unseen no-climb layout and unseen mixed
+    seeds) in probe.py's format with state_text and every v3 truth field (view, yaw_offset_deg, source too;
+    maneuver is None on rotated views): score with rover_data.evaluate_v3 / score_v3."""
+    import collections
+    os.makedirs(os.path.join(out, "frames"), exist_ok=True)
+    jobs = [(c, int(s), k) for c, s in zip(courses.split(","), seeds.split(",")) for k in kinds.split(",")]
+    rows = []
+    for rs, blobs in test_frames_v3b_job.starmap(jobs):
+        for name, b in blobs.items():
+            open(os.path.join(out, "frames", name), "wb").write(b)
+        rows += json.loads(rs)
+    with open(os.path.join(out, "labels.jsonl"), "w") as f:
+        for r in rows:
+            f.write(json.dumps(r) + "\n")
+    lost = [r for r in rows if not r["visible"]]
+    print(len(rows), "frames,", len(lost), "with the rover out of sight ->", out)
+    for src in sorted({r["source"] for r in rows}):
+        rr = [r for r in lost if r["source"] == src]
+        print("  %-8s lost=%4d reappear=%s occluded=%s eta=%s" % (
+            src, len(rr), dict(collections.Counter(r["reappear"] for r in rr)),
+            dict(collections.Counter(r["occluded"] for r in rr)), dict(collections.Counter(r["eta_level"] for r in rr))))
+    print("  all lost reappear:", dict(collections.Counter(r["reappear"] for r in lost)))
 
 
 @app.local_entrypoint()

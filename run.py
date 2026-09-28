@@ -57,6 +57,23 @@ def drive_course(m, d, t):
         d.mocap_pos[mid] = p
 
 
+# reappear-guided reacquisition (Guidance reacq=): act once the pursuit source has not seen the rover for
+# `after_s`, on an answer at most `max_age_s` old; left / right = `turn_deg` off the answer frame's nose (the
+# v3 label splits at 20 deg, and left spans 20-90); behind = turn around toward the side it was last seen on;
+# at most `max_step_rad` of turn per camera frame; forward speed capped at `cap` (laya_pursuit.RangeSpeed's
+# lost_cap) x clip(cos(heading error), `min_speed_frac`, 1).
+#   `occluded_max`: act only when the answer's P(occluded) is at most this: the rover is off to the side or
+#       behind, not hidden behind something in view. Turning toward a rover behind a pocket wall faces the wall
+#       (the same failure as the extrapolated search); with the true labels on CPU, acting regardless lost 9 of
+#       20 code-pursuit flights that finish without it, gated it lost none. 1 acts regardless.
+#   `ahead`: what an "ahead" answer does: "none" (nothing: the code's lost-target behaviour), "answer" (hold
+#       the answer frame's heading at the capped speed) or "live" (hold the live heading at the capped speed).
+#   `clear_m`: act on left / right only while the camera sees at least this much room on that side (the more
+#       open of its two sectors); 0 = regardless.
+REACQ_DEFAULTS = {"after_s": 1.0, "max_age_s": 1.5, "turn_deg": 45.0, "max_step_rad": 0.8, "cap": 2.4,
+                  "min_speed_frac": 0.3, "ahead": "none", "clear_m": 0.0, "occluded_max": 0.5}
+
+
 class Guidance:
     """Turns a scene summary (+ an optional Jev judgment) into a velocity command.
 
@@ -65,8 +82,15 @@ class Guidance:
     open space and flying into it, not by sliding blindly.
     """
 
-    def __init__(self, eye, search_lead_s=5.0, search_on_hold=False, speed_law=None):
+    def __init__(self, eye, search_lead_s=5.0, search_on_hold=False, speed_law=None, tune=None, reacq=None):
         self.eye = eye
+        # pursuit / avoidance tuning against S-shaped paths (pathmetrics.py); empty = the behaviour below
+        # unchanged. Keys: "slide" ("off" | "hyst" | "center"), "slide_hyst_m", "center_gain",
+        # "yaw_tau_s" (low-pass on the pursuit heading), "yaw_db_deg" (soft deadband on the bearing),
+        # "aim" ("track": steer at the smoothed world fix, not the raw bearing), "aim_tau_s", "aim_lead_s"
+        self.tune = dict(tune or {})
+        self._aim_hdg = self._aim_w = self._slide_side = None
+        self._aim_t = self._aim_wt = 0.0
         # forward speed from a model-supplied range (laya_pursuit.RangeSpeed); None: the code's law below
         self.speed_law = speed_law
         # how far (s) the lost-target search may carry the last fix forward along its velocity
@@ -93,6 +117,11 @@ class Guidance:
         self.n_search_nofix = 0
         self.search_ages = []
         self.n_search_steps = 0         # guidance steps flown on a search heading (either branch)
+        # reappear-guided reacquisition (episode reacquire=...): None = off, the behaviour above unchanged;
+        # else REACQ_DEFAULTS overridden by the dict given. Diagnostics: steps flown on it, per side.
+        self.reacq = None if reacq is None else dict(REACQ_DEFAULTS, **reacq)
+        self.n_reacq_steps = 0
+        self.reacq_side_steps = {}
 
     def _search_heading(self, yaw, t, pos):
         """Where the target probably is now: last fix, carried forward by the
@@ -108,13 +137,109 @@ class Guidance:
             return yaw
         return float(np.arctan2(d[1], d[0]))
 
+    def _tuned_yaw(self, tgt, yaw, t, pos, fresh):
+        """The pursuit heading (relative to the live yaw) with self.tune applied."""
+        tn = self.tune
+        wrap = lambda a: (a + np.pi) % (2 * np.pi) - np.pi  # noqa: E731
+        if not tgt["visible"]:
+            self._aim_hdg = self._aim_w = None
+            return 0.0
+        b = float(self.last_bearing)
+        if tn.get("aim") == "track" and pos is not None and self.tgt_w is not None and t - self.tgt_t < 0.3:
+            if fresh:
+                if self._aim_w is None:
+                    self._aim_w = self.tgt_w.copy()
+                elif self.tgt_t > self._aim_wt:
+                    a = 1.0 - np.exp(-(self.tgt_t - self._aim_wt) / max(tn.get("aim_tau_s", 0.6), 1e-3))
+                    self._aim_w = self._aim_w + a * (self.tgt_w - self._aim_w)
+                self._aim_wt = self.tgt_t
+            aim = self._aim_w + self.tgt_v * float(tn.get("aim_lead_s", 0.0))
+            dv = aim - pos[:2]
+            if np.linalg.norm(dv) > 0.5:
+                b = float(wrap(np.arctan2(dv[1], dv[0]) - yaw))
+        db = np.deg2rad(float(tn.get("yaw_db_deg", 0.0)))
+        if db > 0:
+            b = float(np.sign(b) * max(0.0, abs(b) - db))
+        tau = float(tn.get("yaw_tau_s", 0.0))
+        if tau > 0:
+            if fresh or self._aim_hdg is None:
+                h = yaw + b
+                if self._aim_hdg is None:
+                    self._aim_hdg = h
+                else:
+                    self._aim_hdg += (1.0 - np.exp(-(t - self._aim_t) / tau)) * wrap(h - self._aim_hdg)
+                self._aim_t = t
+            b = float(wrap(self._aim_hdg - yaw))
+        return float(np.clip(b, -0.6, 0.6))
+
+    def _tuned_slide(self, left_room, right_room, urgency):
+        """The reactive layer's strafe with self.tune["slide"]: "off" (none), "hyst" (keep the side
+        already chosen until the other is roomier by slide_hyst_m), "center" (proportional to the
+        room difference, so it fades to nothing mid-lane instead of flipping full-strength), "lane"
+        (centre only when walled in on both sides, else unchanged)."""
+        mode = self.tune["slide"]
+        room = max(left_room, right_room)
+        if mode == "off":
+            return 0.0
+        if mode == "hyst":
+            h = float(self.tune.get("slide_hyst_m", 0.75))
+            if self._slide_side is None:
+                self._slide_side = 1.0 if left_room > right_room else -1.0
+            elif self._slide_side > 0 and right_room > left_room + h:
+                self._slide_side = -1.0
+            elif self._slide_side < 0 and left_room > right_room + h:
+                self._slide_side = 1.0
+            side_room = left_room if self._slide_side > 0 else right_room
+            return self._slide_side * 2.6 * urgency * min(1.0, side_room / 4.0)
+        if mode == "center" or (mode == "lane" and room < float(self.tune.get("lane_m", 6.0))):
+            # "lane": the centring law only when walled in on BOTH sides (the roomier side under lane_m);
+            # an obstacle on one side still gets the full-strength strafe away from it
+            k = float(self.tune.get("center_gain", 1.0))
+            return float(np.clip(k * (left_room - right_room), -1.0, 1.0)) * 2.6 * urgency * min(1.0, room / 4.0)
+        if mode == "lane":
+            return (1.0 if left_room > right_room else -1.0) * 2.6 * urgency * min(1.0, room / 4.0)
+        raise ValueError("tune['slide'] must be off, hyst, center or lane, got %r" % mode)
+
+    def _reappear_heading(self, ans, tgt, yaw, t, sec=None):
+        """The world heading to fly while the rover is lost, from the latest reappear answer: None when the
+        rover is in view, lost for less than reacq["after_s"], or the answer is stale (older than max_age_s)
+        or from before this loss began. The side is relative to the nose AT THE ANSWER'S FRAME, so the heading
+        is fixed in the world and a new answer (every ~0.3 s) corrects it: left / right = that nose +- turn_deg,
+        behind = turn around, toward the side the rover was last seen on, ahead = per reacq["ahead"]. None too
+        when the answer says the rover is occluded (P > occluded_max) or, with clear_m, that side is walled off.
+        -> (world heading, side) or None."""
+        rq = self.reacq
+        if rq is None or ans is None or tgt["visible"] or self.lost_for <= rq["after_s"]:
+            return None
+        if t - ans["t"] > rq["max_age_s"] or ans["t"] < t - self.lost_for - 1e-6:
+            return None
+        y0, side = float(ans["yaw"]), ans["side"]
+        if ans.get("occluded") is not None and ans["occluded"] > rq["occluded_max"]:
+            return None                                   # hidden behind something in view: leave it to the code
+        if side in ("left", "right") and rq["clear_m"] > 0 and sec is not None:
+            names = ("far_left", "left") if side == "left" else ("far_right", "right")
+            if max(sec[n] for n in names) < rq["clear_m"]:
+                return None                               # that side is walled off: leave it to the code
+        if side == "left":
+            return y0 + np.deg2rad(rq["turn_deg"]), side
+        if side == "right":
+            return y0 - np.deg2rad(rq["turn_deg"]), side
+        if side == "behind":
+            lb = (ans.get("context") or {}).get("last_seen_bearing_deg")
+            s = -1.0 if (lb is not None and lb < 0) else 1.0
+            return y0 + s * (np.pi - 0.05), side          # just short of pi, so the turn's direction is s
+        if rq["ahead"] == "none":
+            return None
+        return (y0 if rq["ahead"] == "answer" else yaw), side    # ahead: hold a heading
+
     def _open_side(self, sec, left):
         """Bearing of the more open sector on the requested side."""
         names = ("far_left", "left") if left else ("far_right", "right")
         best = max(names, key=lambda n: sec[n])
         return self.eye.sector_bearing(best)
 
-    def __call__(self, scene, judg, yaw, z, use_jev, fresh=False, t=0.0, pos=None, fix=None, vel=None):
+    def __call__(self, scene, judg, yaw, z, use_jev, fresh=False, t=0.0, pos=None, fix=None, vel=None,
+                 reappear=None):
         """`fix`: the target as another perception sees it (laya_pursuit.Locator), in the shape of
         scene["target"]; it replaces the camera's for pursuit only. Its range_m is the code's, and
         None when only the model sees the rover: then hold the not-visible speed -- except with a
@@ -158,6 +283,8 @@ class Guidance:
         # Every heading correction below is expressed RELATIVE to the live yaw and
         # re-derived each camera frame, so nothing can accumulate into a spin.
         yaw_rel = float(np.clip(self.last_bearing, -0.6, 0.6)) if tgt["visible"] else 0.0
+        if self.tune:
+            yaw_rel = self._tuned_yaw(tgt, yaw, t, pos, fresh)
         absolute_yaw = None
         fwd = float(np.clip(1.15 * (rng - STANDOFF) + 1.35, 0.0, 3.6))
         if self.speed_law is not None:
@@ -179,7 +306,13 @@ class Guidance:
             # Strafe, keeping the nose on the target -- but only as fast as the side we
             # are strafing into is actually observed to be clear.
             slide = side * 2.6 * urgency * min(1.0, room / 4.0)
+            if self.tune.get("slide"):
+                slide = self._tuned_slide(left_room, right_room, urgency)
             fwd *= 1.0 - 0.7 * urgency
+
+        # --- reappear-guided reacquisition (off unless self.reacq): where the checkpoint says a lost rover
+        # will come back into view replaces holding the heading and the extrapolated search, below
+        reacq_h = self._reappear_heading(reappear, tgt, yaw, t, sec) if self.reacq is not None else None
 
         # --- Jev's tactical commitment (advisory) --------------------------------
         acted = False
@@ -214,7 +347,7 @@ class Guidance:
                 fwd, slide, turn_bias = min(fwd, 0.5), 0.0, 0.0
             elif mv == "brake":
                 fwd, slide = fwd * 0.15, slide * 0.3
-            elif mv == "reacquire":
+            elif mv == "reacquire" and reacq_h is None:
                 if fresh:
                     self.sweep += 0.35
                     self.yaw_sp = self._search_heading(yaw, t, pos) + 0.45 * np.sin(self.sweep)
@@ -227,7 +360,7 @@ class Guidance:
                 hold_search = self.search_on_hold and mv == "hold_course" and self.lost_for > 1.2
             if judg["risk"] > THRESH["risk_slow_down"]:
                 fwd *= 0.45
-        if hold_search or (not tactical and self.lost_for > 1.2):
+        if reacq_h is None and (hold_search or (not tactical and self.lost_for > 1.2)):
             # baseline search: never keep flying a bearing we can no longer see
             if fresh:
                 self.sweep += 0.3
@@ -235,6 +368,17 @@ class Guidance:
             absolute_yaw = self.yaw_sp
             fwd, slide = SEARCH_SPEED, 0.0
             self.n_search_steps += 1
+
+        if reacq_h is not None and (not tactical or mv in ("hold_course", "reacquire")):
+            # turn toward the predicted side, at most max_step_rad past the live yaw per camera frame (re-derived
+            # each frame, like the pursuit turn), at a moderate speed that drops while the nose is far off
+            # the heading (a turn-around at search speed flies away from the rover); the reactive slide stays
+            err = float((reacq_h[0] - yaw + np.pi) % (2 * np.pi) - np.pi)
+            absolute_yaw = yaw + float(np.clip(err, -self.reacq["max_step_rad"], self.reacq["max_step_rad"]))
+            fwd = min(fwd, self.reacq["cap"]) * float(np.clip(np.cos(err), self.reacq["min_speed_frac"], 1.0))
+            acted = acted or (tactical and mv == "reacquire")
+            self.n_reacq_steps += 1
+            self.reacq_side_steps[reacq_h[1]] = self.reacq_side_steps.get(reacq_h[1], 0) + 1
 
         # --- hard reflex: code overrides everything, Jev included ------------------
         # Reflex on what is in the path, not on what is merely alongside.
@@ -267,7 +411,9 @@ def episode(seed=0, seconds=35.0, use_jev=True, video=None, hz=None, budget=None
             pursuit="code", pursuit_model=None, pursuit_threshold=0.5, pursuit_noise_deg=0.0,
             pursuit_delay_s=0.0, pursuit_lockstep=False, search_lead_s=5.0, search_on_hold=False,
             pursuit_questions="v1", pursuit_sharpen=None, pursuit_gain=None, pursuit_range=None,
-            speed_law="auto", speed_params=None):
+            speed_law="auto", speed_params=None, guide_tune=None, reacquire=None, reacquire_model=None,
+            reacquire_hz=3.0, reacquire_params=None, reacquire_wrong_p=0.0, reacquire_delay_s=0.0,
+            tactics_kw=None):
     """`record`: a list to append a snapshot to every 0.2 s of sim time (pose, obstacles,
     judgment, and the camera frame the model saw), for rendering after the flight
     (flightgif.py). Cheap, so the flight stays real time.
@@ -291,8 +437,21 @@ def episode(seed=0, seconds=35.0, use_jev=True, video=None, hz=None, budget=None
     `search_lead_s`: the longest the lost-target search carries the last world fix forward along
     the rover's observed velocity (Guidance._search_heading). `search_on_hold`: search for a
     rover lost > 1.2 s even while the tactical answer is hold_course (by default a fresh
-    hold_course pre-empts the search, so with const:oracle tactics it never runs)."""
+    hold_course pre-empts the search, so with const:oracle tactics it never runs).
+
+    `backend="laya-v3"`: the drone-rover-v3 checkpoint (`laya_model`) answers the tactical maneuver from the
+    frame + v3 context (tactics.LayaV3Backend; risk / target_truly_lost fixed at the oracle control's values).
+    `tactics_kw`: extra LayaV3Backend arguments, e.g. {"climb_p": 0.12} (climb when P(climb) >= it; None = argmax).
+
+    `reacquire`: None (default: off, nothing below changes), "laya" (the v3 checkpoint's reappear answers;
+    `reacquire_model`, default pursuit_model or laya_model) or "sim" (the v3 label from the simulator, wrong
+    with probability `reacquire_wrong_p`, `reacquire_delay_s` late). Once the pursuit source (the locator, else
+    the code's segmentation) has not seen the rover for reacquire_params["after_s"] (1 s), the frame + v3
+    context goes to laya_pursuit.Reacquirer at most `reacquire_hz` times a second, and Guidance turns toward
+    the predicted side instead of holding course or the extrapolated search (run.REACQ_DEFAULTS,
+    Guidance._reappear_heading)."""
     rng = np.random.default_rng(seed)
+    lap_course = None                # a looped course (town.py): laps, not an end line
     if course == "classic":
         m = mujoco.MjModel.from_xml_path("world.xml")
         drive, rover_at, barrier_x, end_x, oracle = drive_course, rover_pose, 19.0, 77.0, None
@@ -301,17 +460,25 @@ def episode(seed=0, seconds=35.0, use_jev=True, video=None, hz=None, budget=None
         c = courses.make(course, seed)
         m = mujoco.MjModel.from_xml_path(c.write(os.path.dirname(os.path.abspath(__file__))))
         drive, rover_at, barrier_x, end_x, oracle = c.drive, c.rover_pose, c.first_barrier_x, c.end_x, c.oracle
+        lap_course = c if getattr(c, "looped", False) else None
     d = mujoco.MjData(m)
     dt = m.opt.timestep
     x2 = m.body("x2").id
     x2_geoms = set(np.nonzero(m.geom_bodyid == x2)[0].tolist())
 
-    d.qpos[:3] = [1.5 + rng.uniform(-.3, .3), rng.uniform(-.5, .5), CRUISE_ALT]
-    d.qpos[3:7] = [1, 0, 0, 0]
+    if lap_course is None:
+        d.qpos[:3] = [1.5 + rng.uniform(-.3, .3), rng.uniform(-.5, .5), CRUISE_ALT]
+        d.qpos[3:7] = [1, 0, 0, 0]
+    else:                            # behind the rover on its loop, nose on it
+        d.qpos[:7] = lap_course.start_pose(rng, CRUISE_ALT)
+    lap = None if lap_course is None else lap_course.lap_tracker(d.qpos[:2].copy())
     mujoco.mj_forward(m, d)
 
     pilot = flight.Pilot(m)
-    eye = flight.Eye(m, rgb_size=(512, 384) if ((use_jev and laya_image) or pursuit.startswith("laya")) else None)
+    if reacquire not in (None, "sim", "laya"):
+        raise ValueError("reacquire must be None, sim or laya, got %r" % (reacquire,))
+    eye = flight.Eye(m, rgb_size=(512, 384) if ((use_jev and (laya_image or backend == "laya-v3"))
+                                                or pursuit.startswith("laya") or reacquire == "laya") else None)
     model_range = pursuit in ("laya-pursuit", "sim-pursuit")      # the pursuit's range is a model's
     if speed_law not in ("auto", "robust", "code"):
         raise ValueError("speed_law must be auto, robust or code, got %r" % speed_law)
@@ -319,7 +486,8 @@ def episode(seed=0, seconds=35.0, use_jev=True, video=None, hz=None, budget=None
     if model_range and speed_law in ("auto", "robust"):
         import laya_pursuit
         law = laya_pursuit.RangeSpeed(**(speed_params or {}))
-    guide = Guidance(eye, search_lead_s, search_on_hold, speed_law=law)
+    guide = Guidance(eye, search_lead_s, search_on_hold, speed_law=law, tune=guide_tune,
+                     reacq=None if reacquire is None else dict(reacquire_params or {}))
     loc = None
     if pursuit != "code":
         import laya_pursuit
@@ -331,8 +499,9 @@ def episode(seed=0, seconds=35.0, use_jev=True, video=None, hz=None, budget=None
     tac = None
     if use_jev:
         from tactics import Tactician, DEFAULT, make_backend
-        be = make_backend(backend, model=laya_model if backend == "laya" else None,  # "const:<maneuver>" is a control
-                          **({"use_image": laya_image} if backend == "laya" else {}))
+        be = make_backend(backend, model=laya_model if backend in ("laya", "laya-v3") else None,  # "const:<maneuver>" is a control
+                          **({"use_image": laya_image} if backend == "laya" else {}),
+                          **(dict(tactics_kw or {}) if backend == "laya-v3" else {}))
         tac = Tactician(backend=be, lockstep=lockstep,
                         **{k: v for k, v in (("hz", hz), ("budget", budget)) if v})
         if backend == "const:oracle":
@@ -343,6 +512,19 @@ def episode(seed=0, seconds=35.0, use_jev=True, video=None, hz=None, budget=None
     else:
         judg = {"maneuver": "hold_course", "risk": 0.0, "confidence": 0.0,
                 "target_truly_lost": 0.0, "source": "off", "age_s": 0.0, "probabilities": {}}
+    # the v3 context (laya_pursuit.LastSeen) for the v3 tactics and for reacquisition, from the pursuit source
+    wants_ctx = bool(tac) and getattr(tac.backend, "wants_context", False)
+    seen = reacq = rp = None
+    if wants_ctx or reacquire:
+        import laya_pursuit
+        seen = laya_pursuit.LastSeen()
+    if reacquire:
+        reacq = laya_pursuit.Reacquirer(
+            laya_pursuit.make_reappear_backend(reacquire, reacquire_model or pursuit_model or laya_model,
+                                               reacquire_wrong_p, reacquire_delay_s, seed),
+            hz=reacquire_hz,
+            truth=lambda: laya_pursuit.reappear_truth(m, d, rover_at, t, bool(scene["target"]["visible"])))
+    reacq_after = guide.reacq["after_s"] if reacquire else None
 
     writer = cam = big = None
     if video:
@@ -358,6 +540,7 @@ def episode(seed=0, seconds=35.0, use_jev=True, video=None, hz=None, budget=None
     v_des, yaw_cmd = np.zeros(3), 0.0
     scene, fresh = None, False
     vis, frames, standoffs, hits, hit_steps, grounded = 0, 0, [], 0, set(), 0
+    track = []                      # (t, x, y, yaw) at 10 Hz, for pathmetrics
     crashed_at, max_x, crossed, finished_at = None, -99.0, False, None
     jev_steps = reflex_steps = 0
     fix, fix_steps, guide_steps = None, 0, 0
@@ -388,9 +571,14 @@ def episode(seed=0, seconds=35.0, use_jev=True, video=None, hz=None, budget=None
             fresh = True
             frames += 1
             vis += scene["target"]["visible"]
+            if seen is not None and not loc:
+                seen.update(yaw, scene["target"])
             if tac and decision_needed(scene):
                 t_off = time.time()
-                tac.offer(scene, t, eye.last_rgb)
+                if wants_ctx:
+                    tac.offer(scene, t, eye.last_rgb, context=seen.context(yaw, fix if loc else scene["target"]))
+                else:
+                    tac.offer(scene, t, eye.last_rgb)
                 if lockstep and realtime:
                     wall0 += time.time() - t_off   # the world waited for the model
             if loc:
@@ -398,6 +586,13 @@ def episode(seed=0, seconds=35.0, use_jev=True, video=None, hz=None, budget=None
                 loc.offer(eye.last_rgb, t, yaw, scene["target"]["bearing_deg"])
                 if pursuit_lockstep and realtime:
                     wall0 += time.time() - t_off
+            if reacq is not None:
+                src = fix if loc else scene["target"]
+                if src is not None and not src["visible"] and (src["unseen_for_s"] or 0.0) > reacq_after:
+                    t_off = time.time()
+                    reacq.offer(eye.last_rgb, t, yaw, seen.context(yaw, src))
+                    if reacq.lockstep and realtime:
+                        wall0 += time.time() - t_off
 
         if i % 10 == 0 and scene:                        # 50 Hz guidance
             if tac:
@@ -421,8 +616,15 @@ def episode(seed=0, seconds=35.0, use_jev=True, video=None, hz=None, budget=None
                     fix["t_est"] = est["t_est"]
                 fix_steps += est["visible"]
                 guide_steps += 1
-            v_des, yaw_cmd, acted, reflex = guide(scene, judg, yaw, pos[2], use_jev, fresh, t, pos, fix,
-                                                  d.qvel[:3].copy() if law is not None else None)
+            if seen is not None and loc:
+                seen.update(yaw, fix)
+            if reacq is not None:
+                rp = reacq.read(t)
+                v_des, yaw_cmd, acted, reflex = guide(scene, judg, yaw, pos[2], use_jev, fresh, t, pos, fix,
+                                                      d.qvel[:3].copy() if law is not None else None, reappear=rp)
+            else:
+                v_des, yaw_cmd, acted, reflex = guide(scene, judg, yaw, pos[2], use_jev, fresh, t, pos, fix,
+                                                      d.qvel[:3].copy() if law is not None else None)
             if TRACE >= 2 and i % 250 == 0:
                 sec = scene["sector_range_m"]
                 print("    t=%5.1f pos=(%5.1f,%5.1f,%4.1f) yaw=%4.0f mv=%-11s commit=%-11s reflex=%d v=(%4.1f,%4.1f,%4.1f)"
@@ -460,6 +662,10 @@ def episode(seed=0, seconds=35.0, use_jev=True, video=None, hz=None, budget=None
                     hit_steps.add(obj); hits += 1
 
         standoffs.append(float(np.linalg.norm(pos - rover_at(t))))
+        if i % 50 == 0:
+            track.append((t, pos[0], pos[1], yaw))
+            if lap is not None:
+                lap.update(t, pos, standoffs[-1])
         max_x = max(max_x, float(pos[0]))
         if pos[0] > barrier_x + 0.8:      # past the first barrier (beam0 at x=19 on the classic course)
             crossed = True
@@ -494,6 +700,8 @@ def episode(seed=0, seconds=35.0, use_jev=True, video=None, hz=None, budget=None
                                d.mocap_pos[m.body("rover").mocapid[0]] - pos
                                - flight.Eye.NOSE_OFFSET_M * np.array([np.cos(yaw), np.sin(yaw), 0.0])),
                            "code_bearing_deg": scene["target"]["bearing_deg"],
+                           **({"reappear": None if rp is None else {k: rp.get(k) for k in (
+                               "side", "t", "true_side", "occluded", "eta_s")}} if reacq is not None else {}),
                            "code_range_m": scene["target"]["range_m"],
                            "guide": {"lost_for": float(getattr(guide, "lost_for", 0.0) or 0.0),
                                      "yaw_sp": None if guide.yaw_sp is None else float(guide.yaw_sp),
@@ -546,6 +754,13 @@ def episode(seed=0, seconds=35.0, use_jev=True, video=None, hz=None, budget=None
         out["jev"] = tac.stats()
         tac.close()
     out["pursuit"] = pursuit
+    # S-path (weaving) metrics, pathmetrics.py
+    import pathmetrics
+    tr = np.array(track)
+    rv = np.array([rover_at(tt)[:2] for tt in np.arange(0.0, len(standoffs) * dt + 0.05, 0.05)])
+    out["path"] = pathmetrics.summary(tr[:, 0], tr[:, 1:3], tr[:, 3], rv, x1=end_x)
+    if guide_tune:
+        out["guide_tune"] = dict(guide_tune)
     if model_range:
         out["speed_law"] = "robust" if law is not None else "code"
         if law is not None:
@@ -569,6 +784,12 @@ def episode(seed=0, seconds=35.0, use_jev=True, video=None, hz=None, budget=None
                lost_s=round(lost_steps * 10 * dt, 1),
                lost_searching_pct=round(100 * lost_search / lost_steps, 1) if lost_steps else None,
                lost_reflex_pct=round(100 * lost_reflex / lost_steps, 1) if lost_steps else None)
+    if reacq is not None:
+        rs = reacq.stats()
+        reacq.close()
+        out.update(reacquire=reacquire, reacquire_steps=guide.n_reacq_steps,
+                   reacquire_side_steps=dict(guide.reacq_side_steps), reacquire_params=dict(guide.reacq),
+                   reacquire_side_acc=rs["side_acc"], reacquirer=rs)
     if loc:
         st = loc.stats()
         loc.close()
@@ -578,6 +799,8 @@ def episode(seed=0, seconds=35.0, use_jev=True, video=None, hz=None, budget=None
                    pursuit_p90_latency_s=st["p90_latency_s"], locator=st)
         if model_range:
             out["pursuit_range_mae_m"] = st["range_mae_m"]
+    if lap is not None:              # looped course: laps followed; finished = a lap, still tracking at the end
+        lap.report(out, standoffs)
     return out
 
 
@@ -590,7 +813,8 @@ if __name__ == "__main__":
     p.add_argument("--hz", type=float, default=None)
     p.add_argument("--budget", type=int, default=None)
     p.add_argument("--fast", action="store_true", help="run faster than real time (unfair to Jev)")
-    p.add_argument("--backend", default="jev", help="jev, laya, or const:<maneuver> (a control)")
+    p.add_argument("--backend", default="jev",
+                   help="jev, laya, laya-v3 (the v3 checkpoint's maneuver from frame + context), or const:<maneuver>")
     p.add_argument("--laya-model", default=None, help="Hub id or local path (default: tactics.LAYA_MODEL)")
     p.add_argument("--laya-image", action="store_true", help="also give Laya the onboard camera frame")
     p.add_argument("--lockstep", action="store_true", help="pause the sim while the model decides (no latency)")
@@ -624,6 +848,16 @@ if __name__ == "__main__":
                    help="longest (s) the lost-target search extrapolates the last fix along its velocity")
     p.add_argument("--search-on-hold", action="store_true",
                    help="search for a lost rover even while the tactical answer is hold_course")
+    p.add_argument("--reacquire", default=None, choices=["sim", "laya"],
+                   help="turn toward where a lost rover will reappear: the v3 checkpoint's answer (laya, "
+                        "--reacquire-model / --pursuit-model / --laya-model) or the simulator's label (sim)")
+    p.add_argument("--reacquire-model", default=None, help="v3 checkpoint for --reacquire laya")
+    p.add_argument("--reacquire-hz", type=float, default=3.0, help="most reappear questions per sim second")
+    p.add_argument("--reacquire-wrong", type=float, default=0.0, help="sim reacquire: P(wrong side)")
+    p.add_argument("--reacquire-delay", type=float, default=0.0, help="sim reacquire: answer latency (sim s)")
+    p.add_argument("--reacquire-param", action="append", default=[], metavar="K=V",
+                   help="run.REACQ_DEFAULTS override, repeatable (after_s, max_age_s, turn_deg, max_step_rad, cap, "
+                        "min_speed_frac)")
     a = p.parse_args()
     rkw = {k: v for k, v, dflt in (("range_noise_m", a.range_noise, 0.0), ("range_bias", a.range_bias, 1.0),
                                    ("range_offset_m", a.range_offset, 0.0),
@@ -637,7 +871,11 @@ if __name__ == "__main__":
                     pursuit_noise_deg=a.pursuit_noise, pursuit_delay_s=a.pursuit_delay, pursuit_lockstep=a.pursuit_lockstep,
                     search_lead_s=a.search_lead, search_on_hold=a.search_on_hold,
                     pursuit_questions=a.pursuit_questions, pursuit_sharpen=a.pursuit_sharpen, pursuit_gain=a.pursuit_gain,
-                    pursuit_range=rkw or None, speed_law=a.speed_law, speed_params=sp or None)
+                    pursuit_range=rkw or None, speed_law=a.speed_law, speed_params=sp or None,
+                    reacquire=a.reacquire, reacquire_model=a.reacquire_model, reacquire_hz=a.reacquire_hz,
+                    reacquire_wrong_p=a.reacquire_wrong, reacquire_delay_s=a.reacquire_delay,
+                    reacquire_params={k: (v if k == "ahead" else float(v))
+                                      for k, v in (kv.split("=", 1) for kv in a.reacquire_param)} or None)
         print(json.dumps(r))
         sys.stdout.flush()
         if a.out:

@@ -24,6 +24,11 @@ own-motion-predicted range and a gentler, clipped speed command. Code pursuit ke
 
 Runs in a worker thread like tactics.Tactician: offer() never blocks the 500 Hz loop (unless lockstep),
 read() returns the latest estimate and its age. Bearing is + to the aircraft's left, as in flight.py.
+
+v3 (bottom of the file): `v3_state` / `LastSeen` build the drone-rover-v3 state (frame + context JSON);
+`Reacquirer` asks where a lost rover will reappear (`LayaReappear`: the checkpoint; `SimReappear`: the v3
+label from the simulator, for CPU runs) for run.Guidance's reappear-guided reacquisition. Every Laya user in
+the process shares one loaded checkpoint (tactics.shared_laya).
 """
 import threading, queue, time
 import numpy as np
@@ -137,9 +142,10 @@ class SimBackend:
 
 class _Laya:
     def __init__(self, model=None, threshold=0.5, device=None, revision=None):
-        import laya
-        from tactics import LAYA_MODEL, LAYA_BUDGETS
-        self.agent = laya.load_vlm(model or LAYA_MODEL, device=device, revision=revision, **LAYA_BUDGETS)
+        from tactics import shared_laya
+        # one loaded checkpoint per process: the v3 tactics and the reacquisition asker on the same
+        # checkpoint reuse it (tactics.shared_laya; same load_vlm call and budgets as before)
+        self.agent = shared_laya(model, device, revision)
         self.threshold = threshold
         self.delay_s = 0.0                # real latency is wall-clock, measured by the Locator
         self.warmup_s = None
@@ -472,3 +478,231 @@ class Locator:
                 "false_visible": int(self.false_visible), "missed_visible": int(self.missed_visible),
                 "warmup_s": getattr(self.backend, "warmup_s", None),
                 "range_mae_m": r(np.mean(self.range_err), 2) if self.range_err else None}
+
+
+# --- v3: the context JSON, and reacquisition of a lost rover ----------------------------------------------
+# The drone-rover-v3 checkpoint answers occluded / reappear / reappear_eta / maneuver (probe.questions_v3)
+# from the onboard frame plus a small context: how long the rover has been out of sight and where it was
+# last seen, relative to the current nose (probe.V3_CONTEXT_KEYS). The state is exactly the training
+# records' (rover_data.records_v3 / evaluate_v3): {"image": frame, "context": json.dumps(context)}, with the
+# context's keys in V3_CONTEXT_KEYS order, the bearing rounded to 0.1 deg and the range to 0.01 m.
+
+def v3_state(frame, context=None):
+    """The v3 predict state: the frame plus `context` (a dict over probe.V3_CONTEXT_KEYS) as JSON text."""
+    import json
+    st = {}
+    if frame is not None:
+        from PIL import Image
+        st["image"] = frame if isinstance(frame, Image.Image) else Image.fromarray(frame)
+    ctx = context or {}
+    st["context"] = json.dumps({k: ctx.get(k) for k in probe.V3_CONTEXT_KEYS})
+    return st
+
+
+class LastSeen:
+    """The v3 context as the flight knows it, from whatever the pursuit steers on (the code's segmentation, or
+    the locator): unseen_for_s is that source's own, and the last sighting's bearing is re-expressed at the live
+    yaw (the aircraft knows how far it has turned since), as rover_data.collect_flight_v3 labels it."""
+
+    def __init__(self):
+        self.seen = None                    # (bearing deg at the yaw of that moment, range m or None, yaw rad)
+
+    def update(self, yaw, tgt):
+        if tgt is not None and tgt["visible"] and tgt["bearing_deg"] is not None:
+            self.seen = (float(tgt["bearing_deg"]), tgt.get("range_m"), float(yaw))
+
+    def context(self, yaw, tgt):
+        unseen = None if tgt is None else (0.0 if tgt["visible"] else tgt.get("unseen_for_s"))
+        if self.seen is None:
+            return {"unseen_for_s": unseen, "last_seen_bearing_deg": None, "last_seen_range_m": None}
+        b, r, y0 = self.seen
+        b = float((b - np.rad2deg(yaw - y0) + 180.0) % 360.0 - 180.0)
+        return {"unseen_for_s": unseen, "last_seen_bearing_deg": round(b, 1),
+                "last_seen_range_m": None if r is None else round(float(r), 2)}
+
+
+REAPPEAR_SIDES = ("left", "ahead", "right", "behind")     # probe.REAPPEAR's keys
+
+
+def reappear_side(b):
+    """probe.REAPPEAR answer for a bearing (deg, + left) off the nose: |b| > 90 behind (wins), |b| <= 20
+    ahead, else left / right. The same rule as rover_data.reappear_answer, the v3 label."""
+    if abs(b) > 90.0:
+        return "behind"
+    if abs(b) <= 20.0:
+        return "ahead"
+    return "left" if b > 0 else "right"
+
+
+def reappear_truth(m, d, rover_at, t, visible, horizon_s=None):
+    """What the v3 labels say for this moment (rover_data.collect_flight_v3): reappear = the side of
+    rover_at(t + horizon) from the camera relative to the current nose; occluded = not visible although the
+    rover is within the horizontal half-FOV (atan(probe.TAN_H)) and 20 m. -> (side, bearing deg, occluded)."""
+    import flight
+    horizon_s = probe.REAPPEAR_HORIZON_S if horizon_s is None else horizon_s
+    q = d.qpos[3:7]
+    yaw = float(np.arctan2(2 * (q[0] * q[3] + q[1] * q[2]), 1 - 2 * (q[2] ** 2 + q[3] ** 2)))
+    cam = d.qpos[:3] + flight.Eye.NOSE_OFFSET_M * np.array([np.cos(yaw), np.sin(yaw), 0.0])
+
+    def rel(p):
+        r = np.asarray(p, dtype=float) - cam
+        f, l = np.cos(yaw) * r[0] + np.sin(yaw) * r[1], -np.sin(yaw) * r[0] + np.cos(yaw) * r[1]
+        return float(np.rad2deg(np.arctan2(l, f))), float(np.hypot(f, l))
+
+    b3, _ = rel(rover_at(t + horizon_s))
+    bn, rn = rel(d.mocap_pos[m.body("rover").mocapid[0]])
+    occl = (not visible) and abs(bn) <= float(np.rad2deg(np.arctan(probe.TAN_H))) and rn < 20.0
+    return reappear_side(b3), b3, bool(occl)
+
+
+# expected reappear time (s) at each probe.REAPPEAR_ETA level (rover_data.ETA_CENTRES, the soft-target centres)
+ETA_CENTRES = [1.0, 3.0, 7.0, 13.0]
+
+
+class SimReappear:
+    """Test double for the checkpoint's reacquisition answers: the v3 label itself (reappear_truth), so the
+    reacquisition logic can be flown on a CPU. `wrong_p`: probability of a wrong side instead (uniform over
+    the other three), from its own seeded stream; `delay_s`: answer latency in sim time. No ETA (None)."""
+    instant = True
+
+    def __init__(self, wrong_p=0.0, delay_s=0.0, seed=0):
+        self.wrong_p, self.delay_s = float(wrong_p), float(delay_s)
+        self.rng = np.random.default_rng([seed, 4099])
+        self.model = "sim-reappear(wrong=%g,delay=%g)" % (wrong_p, delay_s)
+
+    def answer(self, frame, context, truth):
+        side, _, occl = truth
+        if self.wrong_p and self.rng.random() < self.wrong_p:
+            others = [s for s in REAPPEAR_SIDES if s != side]
+            side = others[int(self.rng.integers(len(others)))]
+        return {"side": side, "p_side": 1.0, "occluded": float(occl), "eta_s": None}
+
+
+class LayaReappear:
+    """The v3 checkpoint's own answers: occluded (noul), reappear (choice), reappear_eta (score; read as the
+    expected ETA_CENTRES value) in one predict on the frame + v3 context (v3_state). Shares the loaded agent
+    (tactics.shared_laya) and warms up before the flight, as the locator does."""
+    instant = False
+    delay_s = 0.0
+
+    def __init__(self, model=None, device=None, revision=None):
+        from tactics import shared_laya
+        self.agent = shared_laya(model, device, revision)
+        q3 = probe.questions_v3()
+        self.qs = {k: q3[k] for k in ("occluded", "reappear", "reappear_eta")}
+        self.model = "laya-reappear:" + (model or "default")
+        blank = np.zeros((384, 512, 3), dtype=np.uint8)
+        ctx = {"unseen_for_s": 2.0, "last_seen_bearing_deg": 30.0, "last_seen_range_m": 3.5}
+        t0 = time.time()
+        self.answer(blank, ctx, None)
+        self.warmup_s = round(time.time() - t0, 2)
+        self.answer(blank, ctx, None)
+
+    def answer(self, frame, context, truth=None):
+        a = self.agent.predict(v3_state(frame, context), self.qs)["answers"]
+        probs = {k: float(v) for k, v in a["reappear"]["probabilities"].items()}
+        side = a["reappear"]["choice"]
+        pe = np.array([float(a["reappear_eta"]["probabilities"][str(i)]) for i in range(len(ETA_CENTRES))])
+        return {"side": side, "p_side": probs.get(side), "probabilities": probs,
+                "occluded": float(a["occluded"]["noul"]),
+                "eta_s": round(float(np.dot(pe / max(pe.sum(), 1e-9), ETA_CENTRES)), 2)}
+
+
+def make_reappear_backend(mode, model=None, wrong_p=0.0, delay_s=0.0, seed=0):
+    if mode == "sim":
+        return SimReappear(wrong_p, delay_s, seed)
+    if mode == "laya":
+        return LayaReappear(model)
+    raise ValueError("reacquire must be sim or laya, got %r" % mode)
+
+
+class Reacquirer:
+    """Asks where a lost rover will reappear: offered every camera frame while the pursuit source has not seen
+    the rover for a while (run.episode decides when), answered at most `hz` times a (sim) second. Same shape as
+    Locator: a worker thread for a model (latest frame wins while it is busy), inline and deterministic for the
+    sim backend. read() returns the latest answer with its frame time and the yaw the frame was taken at (its
+    side is relative to that nose), or None. `truth()` -> reappear_truth tuple: the sim answers from it, and
+    every answer is scored against it."""
+
+    def __init__(self, backend, hz=3.0, truth=None):
+        self.backend = backend
+        self.model = backend.model
+        self.min_dt = 1.0 / float(hz)
+        self.truth = truth
+        self.lockstep = getattr(backend, "instant", False)
+        self.delay_s = getattr(backend, "delay_s", 0.0)
+        self._last_sent = float("-inf")
+        self._q = queue.Queue(maxsize=1)
+        self._pending = []
+        self._latest = None
+        self._lock = threading.Lock()
+        self._done = threading.Event()
+        self.n_offer = self.n_rate = self.n_dropped = self.errors = self.n_answers = 0
+        self.last_error = None
+        self.latency, self.correct = [], []
+        self.sides = {s: 0 for s in REAPPEAR_SIDES}
+        self._stop = threading.Event()
+        self._thread = threading.Thread(target=self._worker, daemon=True)
+        self._thread.start()
+
+    def offer(self, frame, now, yaw, context):
+        self.n_offer += 1
+        if now - self._last_sent < self.min_dt:
+            self.n_rate += 1
+            return
+        self._last_sent = now
+        item = (frame, now, yaw, context, self.truth() if self.truth else None)
+        self._done.clear()
+        try:
+            self._q.put_nowait(item)
+        except queue.Full:
+            try:
+                self._q.get_nowait()
+                self.n_dropped += 1
+            except queue.Empty:
+                pass
+            self._q.put_nowait(item)
+        if self.lockstep:
+            self._done.wait()
+
+    def read(self, now):
+        with self._lock:
+            while self._pending and self._pending[0][0] <= now:
+                self._latest = self._pending.pop(0)[1]
+            return None if self._latest is None else dict(self._latest)
+
+    def _worker(self):
+        while not self._stop.is_set():
+            try:
+                frame, t, yaw, ctx, truth = self._q.get(timeout=0.2)
+            except queue.Empty:
+                continue
+            t0 = time.time()
+            try:
+                a = self.backend.answer(frame, ctx, truth)
+                self.latency.append(time.time() - t0)
+                self.n_answers += 1
+                self.sides[a["side"]] = self.sides.get(a["side"], 0) + 1
+                if truth is not None:
+                    self.correct.append(a["side"] == truth[0])
+                with self._lock:
+                    self._pending.append((t + self.delay_s, dict(a, t=t, yaw=yaw, context=ctx,
+                                                                 true_side=None if truth is None else truth[0])))
+            except Exception as ex:                  # degrade to "no answer", never crash the flight
+                self.errors += 1
+                self.last_error = f"{type(ex).__name__}: {ex}"[:160]
+            finally:
+                self._done.set()
+
+    def close(self):
+        self._stop.set()
+        self._thread.join(timeout=1.0)
+
+    def stats(self):
+        lat = sorted(self.latency)
+        return {"reacquirer": self.model, "offers": self.n_offer, "rate_limited": self.n_rate,
+                "dropped_stale": self.n_dropped, "answers": self.n_answers, "errors": self.errors,
+                "last_error": self.last_error, "sides": self.sides,
+                "side_acc": round(float(np.mean(self.correct)), 3) if self.correct else None,
+                "median_latency_s": round(lat[len(lat) // 2], 3) if lat else None,
+                "warmup_s": getattr(self.backend, "warmup_s", None)}

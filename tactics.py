@@ -176,6 +176,124 @@ class LayaBackend:
         pass
 
 
+_SHARED = {}
+_SHARED_LOCK = threading.Lock()
+
+
+class _LockedAgent:
+    """One loaded Laya checkpoint, shared by every user in the process (the pursuit locator, the v3
+    tactics, the reacquisition asker), with predict() serialised: they run in separate worker threads,
+    and one model on one GPU answers one state at a time anyway. Loading a checkpoint twice costs a
+    second copy of the weights in GPU memory and another load of several seconds."""
+
+    def __init__(self, agent, name):
+        self.agent, self.name = agent, name
+        self.lock = threading.Lock()
+        self.users = 0
+
+    def predict(self, state, questions, **kw):
+        with self.lock:
+            return self.agent.predict(state, questions, **kw)
+
+    def __getattr__(self, k):
+        return getattr(self.agent, k)
+
+
+def shared_laya(model=None, device=None, revision=None):
+    """laya.load_vlm(model, **LAYA_BUDGETS), loaded once per (model, device, revision) per process."""
+    key = (model or LAYA_MODEL, device, revision)
+    with _SHARED_LOCK:
+        a = _SHARED.get(key)
+        if a is None:
+            import laya
+            a = _SHARED[key] = _LockedAgent(laya.load_vlm(key[0], device=device, revision=revision, **LAYA_BUDGETS),
+                                            key[0])
+        a.users += 1
+        return a
+
+
+# What the v3 tactical backend reports for the two questions the drone-rover-v3 checkpoint is not
+# trained on. ConstBackend's values (the oracle control's): below override_risk (1.7), risk_slow_down
+# (1.45) and really_lost (0.5), so neither ever re-decides a commitment, bleeds speed or forces the
+# reacquire search. v3 tactics then differ from const:oracle ONLY in the maneuver, and what happens to a
+# lost rover is left to the pursuit / reacquisition layer (run.py reacquire=...), not to a made-up noul.
+V3_RISK = 0.93
+V3_LOST = 0.45
+# drone-rover-v3/v3.1's `maneuver` almost never answers climb by argmax (climb recall 0-5% on held-out frames)
+# but ranks climb frames well (AUC 0.91-0.94), so climb is decided by P(climb) >= V3_CLIMB_P. 0.12 is the best
+# F1 for v3.1/best on the held-out rover-test-v3 frames (results/probe/rover-test-v3/..v3.1_best/preds-v3.jsonl:
+# recall 0.54, precision 0.62; 0.10: 0.62 / 0.47; 0.15: 0.38 / 0.75). On the behind-heavy rover-test-v3b set
+# precision is far lower (0.06 at 0.12). A false climb is vetoed by Guidance's climb check unless there is
+# measured clear air over a full-width obstacle -- which a pocket's low front wall also passes, so a false climb
+# there still costs; a missed climb at a beam stops the flight.
+V3_CLIMB_P = 0.12
+
+
+class LayaV3Backend:
+    """The drone-rover-v3 checkpoint's own tactical question: probe.questions_v3()["maneuver"] (options =
+    MANEUVERS, trained on the course oracle's answer) from the onboard frame plus the v3 context JSON
+    (probe.V3_CONTEXT_KEYS: unseen_for_s, last_seen_bearing_deg, last_seen_range_m), in the state format
+    laya_pursuit.v3_state builds (the one the v3 training records use). With `with_scene` the Tactician's
+    scene JSON goes in as well (not the trained format; off by default).
+
+    The checkpoint answers only `maneuver`; risk and target_truly_lost are fixed at V3_RISK / V3_LOST (see
+    there). The loaded agent is tactics.shared_laya's, so a laya pursuit locator on the same checkpoint
+    reuses it. Warmed up at construction, like the locator, so the flight's first call is not the slow one.
+
+    `climb_p`: answer climb whenever P(climb) >= climb_p, else the argmax (V3_CLIMB_P; None = argmax only)."""
+    sees_images = True
+    wants_context = True
+
+    def __init__(self, model=None, device=None, revision=None, with_scene=False, climb_p=V3_CLIMB_P, **_ignored):
+        import probe
+        self.agent = shared_laya(model, device, revision)
+        self.model = "laya-v3:" + (model or "default") + ("+scene" if with_scene else "")
+        self.with_scene = bool(with_scene)
+        self.climb_p = None if climb_p is None else float(climb_p)
+        if self.climb_p is not None:
+            self.model += ":climb_p=%g" % self.climb_p
+        self.n_climb_threshold = 0          # calls where the threshold, not the argmax, chose climb
+        self.qs = {"maneuver": probe.questions_v3()["maneuver"]}
+        self.truncated = 0
+        self.warmup_s = None
+        self.warm_up()
+
+    def warm_up(self):
+        import numpy as np
+        blank = np.zeros((384, 512, 3), dtype=np.uint8)
+        ctx = {"unseen_for_s": 0.0, "last_seen_bearing_deg": 0.0, "last_seen_range_m": 3.5}
+        t0 = time.time()
+        self.ask({"observed": {}}, blank, ctx)
+        self.warmup_s = round(time.time() - t0, 2)
+        self.ask({"observed": {}}, blank, ctx)
+
+    def ask(self, state, image=None, context=None):
+        import laya_pursuit
+        st = laya_pursuit.v3_state(image, context)
+        if self.with_scene:
+            st["scene"] = state.get("observed", state)
+        r = self.agent.predict(st, self.qs)
+        a = r["answers"]["maneuver"]
+        if "truncated" in a:
+            self.truncated += 1
+        probs = {k: float(v) for k, v in a["probabilities"].items()}
+        mv = a["choice"]
+        if self.climb_p is not None and mv != "climb" and probs.get("climb", 0.0) >= self.climb_p:
+            mv = "climb"
+            self.n_climb_threshold += 1
+        return {
+            "maneuver": mv,
+            "confidence": round(float(probs.get(mv, a["confidence"])), 3),
+            "probabilities": {k: round(v, 3) for k, v in probs.items()},
+            "risk": V3_RISK,
+            "target_truly_lost": V3_LOST,
+            "source": "laya",
+        }, r.get("usage", {}).get("input_tokens", 0)
+
+    def close(self):
+        pass
+
+
 class ConstBackend:
     """A control, not a model: the same answer every time. If a model flies no better
     than this, its judgments are not what is flying the course."""
@@ -208,7 +326,9 @@ def make_backend(name="jev", **kw):
         return JevBackend(**({"model": kw["model"]} if kw.get("model") else {}))
     if name == "laya":
         return LayaBackend(**{k: v for k, v in kw.items() if v is not None})
-    raise ValueError("backend must be jev or laya, got %r" % name)
+    if name == "laya-v3":
+        return LayaV3Backend(**{k: v for k, v in kw.items() if k != "use_image" and (v is not None or k == "climb_p")})
+    raise ValueError("backend must be jev, laya, laya-v3 or const:<maneuver>, got %r" % name)
 
 
 DEFAULT = {"maneuver": "hold_course", "risk": 0.0, "confidence": 0.0,
@@ -264,8 +384,9 @@ class Tactician:
             (t["unseen_for_s"] or 0) > 2.0,
         )
 
-    def offer(self, scene, now, image=None):
-        """Non-blocking (unless lockstep). Hand the latest scene over if it's worth a call."""
+    def offer(self, scene, now, image=None, context=None):
+        """Non-blocking (unless lockstep). Hand the latest scene over if it's worth a call. `context`: the
+        v3 context dict (laya_pursuit.LastSeen.context), passed on only to a backend that `wants_context`."""
         self.n_offer += 1
         if self.attempts >= self.budget or now - self._last_sent < self.min_dt:
             self.n_ratelimited += 1
@@ -276,7 +397,7 @@ class Tactician:
             return
         try:
             self._done.clear()
-            self._q.put_nowait((scene, now, image))
+            self._q.put_nowait((scene, now, image, context))
             self._last_sent, self._last_key = now, key
         except queue.Full:
             self.n_full += 1
@@ -293,13 +414,16 @@ class Tactician:
     def _worker(self):
         while not self._stop.is_set():
             try:
-                scene, now, image = self._q.get(timeout=0.2)
+                scene, now, image, context = self._q.get(timeout=0.2)
             except queue.Empty:
                 continue
             t0 = time.time()
             self.attempts += 1  # counts against the budget whether or not the call succeeds
             try:
-                judgment, tokens = self.backend.ask(build_state(scene), image)
+                if getattr(self.backend, "wants_context", False):
+                    judgment, tokens = self.backend.ask(build_state(scene), image, context)
+                else:
+                    judgment, tokens = self.backend.ask(build_state(scene), image)
                 self.tokens += tokens
                 self.calls += 1
                 self.latency.append(time.time() - t0)
@@ -329,4 +453,7 @@ class Tactician:
                 "last_error": self.last_error, "tokens": self.tokens,
                 "offers": self.n_offer, "rate_limited": self.n_ratelimited, "queue_full": self.n_full,
                 "median_latency_s": round(lat[len(lat) // 2], 3) if lat else None,
-                "p90_latency_s": round(lat[int(len(lat) * 0.9)], 3) if lat else None}
+                "p90_latency_s": round(lat[int(len(lat) * 0.9)], 3) if lat else None,
+                **({"warmup_s": self.backend.warmup_s} if hasattr(self.backend, "warmup_s") else {}),
+                **({"climb_by_threshold": self.backend.n_climb_threshold}
+                   if hasattr(self.backend, "n_climb_threshold") else {})}
