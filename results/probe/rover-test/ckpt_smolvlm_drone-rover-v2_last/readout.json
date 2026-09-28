@@ -1,0 +1,21 @@
+{
+ "steer_sharpen": 1.5,
+ "range_sharpen": 3.0,
+ "fit_frames": 481,
+ "test_frames": 403,
+ "fitted": {
+  "steer_mae_within34_deg": 4.37,
+  "steer_snapped_frac": 0.231,
+  "range_mae_m": 0.66
+ },
+ "v2_default": {
+  "steer_mae_within34_deg": 4.39,
+  "steer_snapped_frac": 0.285,
+  "range_mae_m": 0.662
+ },
+ "raw": {
+  "steer_mae_within34_deg": 4.65,
+  "steer_snapped_frac": 0.211,
+  "range_mae_m": 0.734
+ }
+}
