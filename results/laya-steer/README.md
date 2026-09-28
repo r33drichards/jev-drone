@@ -17,7 +17,8 @@ A100 (about $2). Checkpoint `/ckpt/smolvlm/drone-rover-v1/best` on laya-checkpoi
 | cauldron_vqav2 / aokvqa / ai2d | 77.1% / 74.5% / 77.7% | 0.19 / 0.22 / 0.17 |
 
 At its first eval (step 2648) the three Cauldron sets were within about a point of these
-(77.0 / 73.0 / 76.2), so the drone data did not cost general ability.
+(77.0 / 73.0 / 76.2). They were not scored for the base checkpoint on the same 1000-question
+subsets, so whether the drone data cost any general ability is not measured here.
 
 ## Probe on held-out frames
 
