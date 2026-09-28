@@ -68,6 +68,8 @@ def make_gif(record, course, seed, title, directory=".", every=2, frame_ms=100, 
     mp = mp.resize((map_w, map_h))
     span = c.end_x + 4.0
     to_map = lambda x, y: (map_w / 2 + (x - span / 2) / span * map_w, map_h / 2 - y / span * map_w)  # noqa: E731
+    if hasattr(c, "map_px"):            # a course with its own map layout (town.py)
+        to_map = lambda x, y: c.map_px(x, y, map_w, map_h)  # noqa: E731
 
     # trim a stuck ending: stop a few seconds after the last real progress
     xs = [s["qpos"][0] for s in record]
@@ -76,6 +78,9 @@ def make_gif(record, course, seed, title, directory=".", every=2, frame_ms=100, 
         if x > best + 0.5:
             best, last_gain = x, k
     end = min(len(record), last_gain + int(trim_after_s / 0.2) + 1)
+    if getattr(c, "looped", False):     # a loop makes no x progress to trim on: keep the whole flight,
+        end = len(record)               # at one frame in 3 (6x), or a 120 s lap is a ~13 MB GIF
+        every = max(every, 3)
 
     font = _font()
     frames = []

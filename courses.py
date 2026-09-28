@@ -205,6 +205,9 @@ SECONDS = 90.0
 
 def render(name, seed=0, directory=".", width=1400, height=320):
     """Top-down view of a course with the rover's path dotted on, as PNG bytes."""
+    if name.startswith("town"):          # its own map (town.render; flightgif places points with map_px)
+        import town
+        return town.render(name, seed, directory)
     import io, mujoco
     from PIL import Image, ImageDraw
     c = make(name, seed)
@@ -240,6 +243,9 @@ def render(name, seed=0, directory=".", width=1400, height=320):
 
 
 def make(name, seed=0):
+    if name.startswith("town"):          # the looped suburban map, town.py
+        import town
+        return town.make(name, seed)
     stations, end_x = LAYOUTS[name]
     rng = np.random.default_rng(1000 + seed)
     out = [(k, x, 0 if k == "beam" else int(rng.choice([-1, 1]))) for k, x in stations]
