@@ -39,7 +39,10 @@ app = modal.App("jev-drone-laya", image=image)
 hf_vol = modal.Volume.from_name("laya-hf-cache")
 data_vol = modal.Volume.from_name("laya-datasets")
 ckpt_vol = modal.Volume.from_name("laya-checkpoints")   # fine-tuned runs: pass --model /ckpt/smolvlm/<run>/best
-ROVER_SET = "drone_rover"          # /data/vqa/drone_rover on laya-datasets, for laya-vision's finetune_long
+ROVER_SET = "drone_rover"
+# at most this many GPU containers per flight function at once: a 72-flight sweep otherwise asks
+# for one GPU per flight (~40 at once); capped, it queues and takes a few times longer
+GPU_MAX = int(os.environ.get("JEV_GPU_MAX", "10"))          # /data/vqa/drone_rover on laya-datasets, for laya-vision's finetune_long
 
 # name -> (use the model?, backend, laya sees the camera frame, lockstep[, pursuit kwargs for run.episode])
 CONFIGS = {
@@ -59,6 +62,8 @@ CONFIGS = {
     "code-pursuit-oracle": (True, "const:oracle", False, False, {"pursuit": "code"}),   # the baseline
     "laya-steer-strips": (True, "const:oracle", False, False, {"pursuit": "laya-strips"}),
     "laya-steer-frame": (True, "const:oracle", False, False, {"pursuit": "laya-frame"}),
+    # Laya sets heading AND forward speed (its speed answer as a range), from one predict per frame
+    "laya-pursuit": (True, "const:oracle", False, False, {"pursuit": "laya-pursuit"}),
     "laya-steer-strips-lockstep": (True, "const:oracle", False, False, {"pursuit": "laya-strips", "pursuit_lockstep": True}),
     # model-free stand-ins (CPU): the true bearing, then with a strips-like 0.2 s latency and ~6 deg noise
     "sim-steer": (True, "const:oracle", False, False, {"pursuit": "sim"}),
@@ -115,7 +120,7 @@ def scenes_remote(model: str = "", variants=(("full budgets, no image", []),)):
     return text, rows
 
 
-@app.function(gpu=["L4", "A10G"], cpu=4, memory=16384, timeout=60 * 60,
+@app.function(gpu=["L4", "A10G"], cpu=4, memory=16384, timeout=60 * 60, max_containers=GPU_MAX,
               volumes={"/cache/hf": hf_vol, "/ckpt": ckpt_vol.read_only()})
 def fly(config: str, seed: int, seconds: float, model: str = "", course: str = "classic", budget: int = 0):
     _enter()
@@ -148,7 +153,7 @@ def render_course(course: str, seed: int):
     return courses.render(course, seed, "/root/jev")
 
 
-@app.function(gpu=["L4", "A10G"], cpu=4, memory=16384, timeout=60 * 60,
+@app.function(gpu=["L4", "A10G"], cpu=4, memory=16384, timeout=60 * 60, max_containers=GPU_MAX,
               volumes={"/cache/hf": hf_vol, "/ckpt": ckpt_vol.read_only()})
 def fly_gif(config: str, seed: int, seconds: float, course: str, budget: int = 0, model: str = ""):
     """fly(), recording the flight, then render it as a GIF (flightgif.py) after the flight ends.
@@ -178,7 +183,10 @@ def fly_gif(config: str, seed: int, seconds: float, course: str, budget: int = 0
                       **{k: s.get(k) for k in ("target_visible", "loc", "true_bearing_deg", "code_bearing_deg",
                                                "code_range_m", "guide", "reflex", "climbing", "hits")},
                       "maneuver": s["judg"].get("maneuver")})
-    return r, flightgif.make_gif(rec, course, seed, title, "/root/jev"), json.dumps(track, default=float)
+    label = "tactics (oracle)" if backend == "const:oracle" else "tactics (%s)" % (
+        backend if use_model else "none")
+    return (r, flightgif.make_gif(rec, course, seed, title, "/root/jev", tactics_label=label),
+            json.dumps(track, default=float))
 
 
 @app.function(gpu=["L4", "A10G"], cpu=4, memory=16384, timeout=60 * 60,

@@ -195,7 +195,9 @@ LAYOUTS = {
     # a trap, a beam, a decoy, a trap: needs climb once and the correct side three times
     "mixed": ([("pocket", 16.0), ("beam", 38.0), ("decoy", 48.0), ("pocket", 64.0)], 84.0),
     # no climbing anywhere: every full-width obstacle is a trap or a wall
-    "no-climb": ([("pocket", 16.0), ("decoy", 36.0), ("pocket", 50.0)], 70.0),
+    # decoy at 40, not 36: the first pocket's rover path runs back to the centre line by x = 35, and
+    # a decoy approach starting before that made the rover jump 4.7 m sideways at x = 35
+    "no-climb": ([("pocket", 16.0), ("decoy", 40.0), ("pocket", 54.0)], 74.0),
 }
 # The rover reaches the end of the longest course at about t = 68 s; fly them for 90 s.
 SECONDS = 90.0
