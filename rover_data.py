@@ -189,7 +189,7 @@ CLASSIC_BEAMS_X = (19.0, 44.0)        # world.xml beam0 / beam1
 OCCLUDED_MAX_RANGE_M = 20.0
 MAST_TOP_DZ = 0.8                     # rover centre z 0.2 -> mast top ~1.05 m
 V3_COURSES = {"pockets": "const:oracle", "mixed": "const:oracle", "classic": "const:climb"}
-V3_SECONDS = {"pockets": 90.0, "mixed": 90.0, "no-climb": 90.0, "classic": 70.0}
+V3_SECONDS = {"pockets": 90.0, "mixed": 90.0, "no-climb": 90.0, "classic": 70.0, "tactics": 110.0, "town": 120.0}
 
 
 def classic_oracle(pos):
@@ -223,10 +223,13 @@ def _wrap_deg(a):
     return float((a + 180.0) % 360.0 - 180.0)
 
 
-def collect_flight_v3(course, seed, seconds=None, every_s=0.5, lost_every_s=0.25, eta_max_s=15.0, eta_step_s=0.25):
+def collect_flight_v3(course, seed, seconds=None, every_s=0.5, lost_every_s=0.25, eta_max_s=15.0, eta_step_s=0.25,
+                      every_at=None):
     """Fly (oracle tactics; const:climb on classic) and return v3 snapshots, every `every_s` and every
     `lost_every_s` while the rover is out of the eye's segmentation. Each: the natural frame as JPEG, the
-    flight's context (probe.V3_CONTEXT_KEYS) and every v3 label (see the block comment above)."""
+    flight's context (probe.V3_CONTEXT_KEYS) and every v3 label (see the block comment above).
+    `every_at`: a function of the drone position -> snapshot interval (s), replacing every_s / lost_every_s
+    (drone_rover_tac: dense near beams and pocket walls, sparse elsewhere)."""
     import mujoco, run, flight, courses
     from PIL import Image
     seconds = seconds or V3_SECONDS.get(course, 90.0)
@@ -250,7 +253,8 @@ def collect_flight_v3(course, seed, seconds=None, every_s=0.5, lost_every_s=0.25
         vis = bool(tg["visible"])
         if vis:
             st["seen"] = (t, float(tg["bearing_deg"]), float(tg["range_m"]), yaw)
-        if t - st["last"] < (every_s if vis else lost_every_s) - 1e-6:
+        gap = every_at(pos) if every_at is not None else (every_s if vis else lost_every_s)
+        if t - st["last"] < gap - 1e-6:
             return sc
         st["last"] = t
         m = self.m
@@ -437,6 +441,8 @@ def score_v3(preds):
                            "climb_auc": probe._auc([p["maneuver_probs"]["climb"] for p in preds if p["maneuver"] == "climb"],
                                                    [p["maneuver_probs"]["climb"] for p in preds if p["maneuver"] != "climb"]),
                            "confusion": conf(preds, "maneuver", "maneuver_probs", keys)}
+        if any("station_kind" in p for p in preds):
+            out["maneuver_tac"] = score_tac(preds)
     return out
 
 
@@ -494,6 +500,7 @@ class _V3Labeller:
         self.rmid = m.body("rover").mocapid[0]
         self.etas = np.arange(0.0, eta_max_s + 1e-9, eta_step_s)
         self.half_fov = float(np.rad2deg(np.arctan(probe.TAN_H)))
+        self.count_ids = None                               # geom ids whose seg pixels view() also counts
 
     def set_state(self, st):
         mj = self.mj
@@ -516,6 +523,7 @@ class _V3Labeller:
         seg = eye.seg.render()[:, :, 0]
         mask = np.isin(seg, eye.target_ids)
         px = int(mask.sum())
+        count_px = None if self.count_ids is None else int(np.isin(seg, self.count_ids).sum())
         sb = sr = None
         if px >= 3:
             eye.depth.update_scene(self.d3, eye.cam)
@@ -538,15 +546,15 @@ class _V3Labeller:
         return {"jpeg": buf.getvalue(), "seg_visible": px >= 3, "seg_pixels": px, "seg_bearing_deg": sb,
                 "seg_range_m": sr, "bearing_deg": b_now, "range_m": r_now, "in_fov": bool(in_fov),
                 "reappear": reappear_answer(b3), "reappear_bearing_deg": b3, "reappear_range_m": r3,
-                "eta_s": eta, "los_now": eta == 0.0}
+                "eta_s": eta, "los_now": eta == 0.0, "count_px": count_px}
 
 
-def _fly_record(course, seed, every_s, backend, **episode_kw):
+def _fly_record(course, seed, every_s, backend, seconds=None, **episode_kw):
     """Fly run.episode, recording at the eye's frames: every sighting (t, seg bearing, seg range, yaw), the
     loss intervals of the eye's segmentation, and a snapshot (sim state, pose, the eye's target, the v3
     context as collect_flight_v3 builds it) every `every_s`. -> (model, rover_at, oracle, snaps, sightings, losses)"""
     import run, flight, courses
-    seconds = V3_SECONDS.get(course, 90.0)
+    seconds = seconds or V3_SECONDS.get(course, 90.0)
     if course == "classic":
         rover_at, oracle = run.rover_pose, classic_oracle
     else:
@@ -670,7 +678,9 @@ def label_counts(recs):
     import collections
     from tactics import MANEUVERS
     names = {"reappear": list(probe.REAPPEAR), "maneuver": list(MANEUVERS), "occluded": ["false", "true"],
-             "reappear_eta": [str(i) for i in range(len(probe.REAPPEAR_ETA))]}
+             "reappear_eta": [str(i) for i in range(len(probe.REAPPEAR_ETA))],
+             "visible": ["false", "true"], "where": ["left", "centre", "right", "not visible"],
+             "steer7": [str(i) for i in range(len(probe.STEER7))], "range8": [str(i) for i in range(len(probe.RANGE8))]}
     out = collections.defaultdict(collections.Counter)
     for r in recs:
         q = r["id"].rsplit("-", 1)[1]
@@ -692,3 +702,338 @@ def balance_reappear(recs, max_share=None, seed=0):
         if len(idx[k]) > cap:
             drop |= set(rng.choice(idx[k], len(idx[k]) - cap, replace=False).tolist())
     return [r for i, r in enumerate(recs) if i not in drop]
+
+
+# ---------------------------------------------------------------------------------------------------------
+# drone_rover_tac: `maneuver` at beams (climb) against pocket front walls (hold_course), probe.questions_v3()
+# ---------------------------------------------------------------------------------------------------------
+# v3.1 could not tell a real beam from a pocket's low front wall (results/laya-steer/README.md): P(climb) rarely
+# passed 0.2 and it climbed into pockets. This set is maneuver-only, oracle flights (collect_flight_v3 with the
+# natural heading, labels exactly v3's: maneuver = the course oracle, state_text = the v3 context), sampled every
+# TAC_DENSE_S while the drone is within TAC_BEFORE_M before a beam or a pocket's front wall (TAC_AFTER_M past it),
+# every TAC_SPARSE_S elsewhere. Each frame is tagged with the station it is approaching:
+#   station_kind   the first station (in x order) with -TAC_AFTER_M <= station_x - drone_x <= TAC_BEFORE_M
+#                  (beam / pocket / decoy), else "none"; station_dx_m = station_x - drone_x (m, + ahead; for
+#                  "none" the next station ahead, None past the last)
+# Beam frames 5-10 m out are hold_course (the oracle climbs from 5 m before to 0.6 m past), so the "beam" tag
+# carries both answers; every "pocket" frame is hold_course: the hard negatives.
+# balance_tac keeps climb : pocket-hold : other-hold ~ 1 : 1 : 1 per split.
+TAC_BEFORE_M, TAC_AFTER_M = 10.0, 1.0
+TAC_DENSE_S, TAC_SPARSE_S = 0.25, 1.0
+TAC_DENSE_KINDS = ("beam", "pocket")
+
+
+def tac_stations(course, seed):
+    """[(kind, x)] in x order: world.xml's two beams on classic, else the courses.Course stations."""
+    if course == "classic":
+        return [("beam", float(x)) for x in CLASSIC_BEAMS_X]
+    import courses
+    return sorted([(k, float(x)) for k, x, _ in courses.make(course, seed).stations], key=lambda s: s[1])
+
+
+def station_at(stations, x, before=TAC_BEFORE_M, after=TAC_AFTER_M):
+    """(station_kind, station_dx_m) for a drone at x (see the block comment above)."""
+    for kind, sx in stations:
+        dx = sx - float(x)
+        if -after <= dx <= before:
+            return kind, round(dx, 2)
+    ahead = [sx - float(x) for _, sx in stations if sx - float(x) > before]
+    return "none", (round(min(ahead), 2) if ahead else None)
+
+
+def collect_flight_tac(course, seed, seconds=None):
+    """Oracle flight (const:climb on classic), natural heading, v3 frames sampled densely near beams / pocket
+    walls, each with station_kind and station_dx_m."""
+    st = tac_stations(course, seed)
+
+    def every_at(pos):
+        kind, _ = station_at(st, pos[0])
+        return TAC_DENSE_S if kind in TAC_DENSE_KINDS else TAC_SPARSE_S
+
+    frames = collect_flight_v3(course, seed, seconds, every_at=every_at)
+    for f in frames:
+        f["station_kind"], f["station_dx_m"] = station_at(st, f["pos"][0])
+    return frames
+
+
+def tac_frame_labels(f):
+    return dict(v3_frame_labels(f), station_kind=f["station_kind"], station_dx_m=f["station_dx_m"],
+                pos=f["pos"], yaw_deg=f["yaw_deg"])
+
+
+def tac_group(r):
+    """climb / pocket_hold / other_hold."""
+    if r["maneuver"] == "climb":
+        return "climb"
+    return "pocket_hold" if r["station_kind"] == "pocket" else "other_hold"
+
+
+def records_tac(frames, image_dir, rel_prefix="images"):
+    """Write the frames' images and return one `maneuver` record per frame (probe.questions_v3()["maneuver"],
+    the frame + state_text), with the tac truth fields."""
+    from tactics import MANEUVERS
+    os.makedirs(image_dir, exist_ok=True)
+    q = probe.questions_v3()["maneuver"]
+    man = list(MANEUVERS)
+    recs = []
+    for f in frames:
+        stem = "tac-%s-%d-%06.2f" % (f["course"], f["seed"], f["t"])
+        open(os.path.join(image_dir, stem + ".jpg"), "wb").write(f["jpeg"])
+        recs.append(dict(tac_frame_labels(f), id=stem + "-maneuver", image="%s/%s.jpg" % (rel_prefix, stem),
+                         question=q, label=man.index(f["maneuver"])))
+    return recs
+
+
+def balance_tac(recs, ratio=(1.0, 1.0, 1.0), seed=0):
+    """Subsample (seeded) so climb : pocket_hold : other_hold ~ ratio, never dropping a climb record unless
+    pocket_hold runs short (then the climbs are capped to it). -> (records, counts before, counts after)."""
+    groups = {"climb": [], "pocket_hold": [], "other_hold": []}
+    for i, r in enumerate(recs):
+        groups[tac_group(r)].append(i)
+    before = {k: len(v) for k, v in groups.items()}
+    unit = min(before["climb"] / ratio[0], before["pocket_hold"] / ratio[1])
+    if unit <= 0:
+        return list(recs), before, dict(before)
+    rng, keep = np.random.default_rng(seed), set()
+    for (k, idx), w in zip(groups.items(), ratio):
+        cap = int(round(unit * w))
+        keep |= set(idx) if len(idx) <= cap else set(rng.choice(idx, cap, replace=False).tolist())
+    out = [r for i, r in enumerate(recs) if i in keep]
+    after = {k: sum(tac_group(r) == k for r in out) for k in groups}
+    return out, before, after
+
+
+def tac_counts(recs):
+    """{station_kind: {maneuver: n}} and {group: n}."""
+    import collections
+    by = collections.defaultdict(collections.Counter)
+    for r in recs:
+        by[r["station_kind"]][r["maneuver"]] += 1
+    return {"by_station": {k: dict(v) for k, v in sorted(by.items())},
+            "groups": dict(collections.Counter(tac_group(r) for r in recs))}
+
+
+def score_tac(preds, thresholds=None):
+    """maneuver per station_kind, from evaluate_v3 predictions on rows with station_kind (tac_frame_labels).
+
+      by_station      per kind: n, climb truth count, argmax-climb rate, mean P(climb) for truth climb / hold
+      climb_recall_beams        argmax climb recall on beam frames whose truth is climb
+      false_climb_pocket        argmax climb rate on pocket frames (all hold_course: the hard negatives)
+      beam_vs_pocket_auc        P(climb): truth-climb beam frames against pocket frames
+      best_threshold            climb iff P(climb) >= thr, thr chosen by F1 over every frame; its recall,
+                                precision, recall at beams and false-climb rate at pocket fronts
+      at_thresholds             the same numbers at a few fixed thresholds (0.12 is tactics.V3_CLIMB_P)
+    """
+    preds = [p for p in preds if p.get("maneuver") is not None and p.get("station_kind") is not None]
+    if not preds:
+        return None
+    pc = np.array([p["maneuver_probs"]["climb"] for p in preds])
+    am = np.array([max(p["maneuver_probs"], key=p["maneuver_probs"].get) == "climb" for p in preds])
+    truth = np.array([p["maneuver"] == "climb" for p in preds])
+    kind = np.array([p["station_kind"] for p in preds])
+    beam_c, pocket = (kind == "beam") & truth, kind == "pocket"
+
+    def at(pred):
+        tp = int((pred & truth).sum())
+        rec = tp / max(1, int(truth.sum()))
+        prec = tp / int(pred.sum()) if pred.sum() else None
+        f1 = 2 * rec * prec / (rec + prec) if prec else 0.0
+        return {"recall": rec, "precision": prec, "f1": f1, "n_pred_climb": int(pred.sum()),
+                "climb_recall_beams": float(pred[beam_c].mean()) if beam_c.any() else None,
+                "false_climb_pocket": float(pred[pocket].mean()) if pocket.any() else None,
+                "false_climb_other": float(pred[~truth & ~pocket].mean()) if (~truth & ~pocket).any() else None}
+
+    by = {}
+    for k in sorted(set(kind.tolist())):
+        m = kind == k
+        by[k] = {"n": int(m.sum()), "truth_climb": int((m & truth).sum()), "argmax_climb_rate": float(am[m].mean()),
+                 "mean_p_climb_truth_climb": float(pc[m & truth].mean()) if (m & truth).any() else None,
+                 "mean_p_climb_truth_hold": float(pc[m & ~truth].mean()) if (m & ~truth).any() else None}
+    cands = np.unique(np.concatenate([pc, [1.01]]))
+    fits = [(at(pc >= c)["f1"], c) for c in cands]
+    f1, thr = max(fits)
+    out = {"n": len(preds), "truth_climb": int(truth.sum()), "by_station": by,
+           "argmax": at(am), "climb_recall_beams": at(am)["climb_recall_beams"],
+           "false_climb_pocket": at(am)["false_climb_pocket"],
+           "beam_vs_pocket_auc": probe._auc(pc[beam_c].tolist(), pc[pocket].tolist()),
+           "climb_auc": probe._auc(pc[truth].tolist(), pc[~truth].tolist()),
+           "best_threshold": dict(at(pc >= thr), threshold=float(thr)),
+           "at_thresholds": {"%g" % c: at(pc >= c) for c in (thresholds or (0.12, 0.2, 0.3, 0.5))}}
+    return out
+
+
+# ---------------------------------------------------------------------------------------------------------
+# drone_rover_town: perception (v2) and reacquisition (v3) on the town map (town.py)
+# ---------------------------------------------------------------------------------------------------------
+# Flights: const:oracle tactics (always hold_course on the town), code pursuit ("code") or one of the model-free
+# stand-ins that lose the rover (TOWN_FAILURE keys), TOWN_SECONDS each. The sim state is recorded
+# every 0.25 s (_fly_record); a snapshot is kept every TOWN_EVERY_S, and every one while the eye has lost the
+# rover. Each kept snapshot is rendered (_V3Labeller: every label from the rendered view's own camera) as
+#   natural   the true heading: perception (visible, where, steer7 / range8 with soft targets, exactly as
+#             v2_records builds them) and, when the rover is out of view or for 1 in TOWN_VISIBLE_EVERY visible
+#             snapshots, occluded / reappear (+ reappear_eta when out of view) with the flight's v3 context
+#   jitter    `jitter_views` views turned by U(+-TOWN_JITTER_DEG): perception only
+#   rotated   with probability rot_p, one v3b-style turned-in-place view whose rover-in-3-s bearing is drawn from
+#             V3B_VIEW_CLASS_P ("behind" well represented), context re-expressed at that heading as v3b does:
+#             visible, and occluded / reappear / reappear_eta under the same rule as natural views
+#   scenery   with probability scenery_p, a view aimed (+-15 deg) at a random rover-coloured scenery geom
+#             (TOWN_RED_MATERIALS: shed, porch roof, planter / crates, doors, the ochre west roof) 3-20 m away:
+#             perception only. With the rover out of the segmentation these are the hard negatives for visible.
+# Every view records scenery_px, the rover-coloured scenery pixels in the eye's 96x72 segmentation.
+TOWN_EVERY_S, TOWN_LOST_EVERY_S = 0.5, 0.25
+TOWN_JITTER_DEG = 45.0
+TOWN_VISIBLE_EVERY = 4
+TOWN_RED_MATERIALS = ("shed", "roof", "crate", "door", "roofW")
+TOWN_SCENERY_MIN_PX = 20        # a view "shows red scenery" at this many segmentation pixels (of 6912)
+TOWN_MAX_UNSEEN_S = 15.0        # snapshots whose natural view lost the rover longer ago are skipped (a stranded
+                                # aircraft far behind: sim10 in the town loses the rover early and never recovers)
+# failure stand-ins for the town: V3B_FAILURE's, plus sim8, between sim6 (never loses the rover on the town:
+# 99.9% in view, seeds 10-12) and sim10 (2-3% in view, stranded or crashed by ~15 s): 22-45% in view, seeds 10-11
+TOWN_FAILURE = dict(V3B_FAILURE, sim8=dict(pursuit="sim", pursuit_noise_deg=8.0, pursuit_delay_s=0.3))
+
+
+def _town_scenery(m):
+    """(geom ids, [(name, x, y)]) of the rover-coloured scenery."""
+    mats = {m.material(i).name: i for i in range(m.nmat)}
+    want = [mats[k] for k in TOWN_RED_MATERIALS if k in mats]
+    ids = np.nonzero(np.isin(m.geom_matid, want))[0]
+    return ids, [(m.geom(int(i)).name, float(m.geom_pos[i][0]), float(m.geom_pos[i][1])) for i in ids]
+
+
+def _where(visible, b):
+    if not visible:
+        return 3
+    x = probe.bearing_to_x(b)
+    return 0 if x < 1 / 3 else (2 if x > 2 / 3 else 1)
+
+
+def collect_flight_town(seed, kind="code", seconds=None, jitter_views=2, rot_p=0.5, scenery_p=0.5,
+                        course="town"):
+    """drone_rover_town frames from one flight (see the block comment above). kind: "code" or a TOWN_FAILURE
+    key. Frames carry v3_frame_labels' keys plus stem, view, yaw_offset_deg, source, scenery_px, and
+    perception / reacq flags (which questions records_town asks of the view)."""
+    import zlib
+    rng = np.random.default_rng([seed, zlib.crc32(("town/%s" % kind).encode())])
+    kw = {} if kind == "code" else TOWN_FAILURE[kind]
+    m, rover_at, oracle, snaps, sightings, losses = _fly_record(course, seed, TOWN_LOST_EVERY_S, "const:oracle",
+                                                                seconds=seconds, **kw)
+    lab = _V3Labeller(m, rover_at, oracle)
+    sc_ids, sc_geoms = _town_scenery(m)
+    lab.count_ids = sc_ids
+    sight_t = np.array([s[0] for s in sightings]) if sightings else np.zeros(0)
+    frames, last, n_vis = [], -1e9, {"natural": 0, "rotated": 0}
+
+    def reacq_flag(view, vis):
+        if not vis:
+            return True
+        n_vis[view] += 1
+        return (n_vis[view] - 1) % TOWN_VISIBLE_EVERY == 0
+
+    def add(sn, v, view, off, yv, ctx, maneuver, perception, reacq_ok):
+        vis = v["seg_visible"]
+        stem = "town-%s-%d-%06.2f-%s%s" % (kind, seed, sn["t"], view, "" if view == "natural" else "%+.0f" % off)
+        f = _frame(course, seed, sn, v, stem, visible=vis, pixels=v["seg_pixels"],
+                   yaw_deg=round(float(np.rad2deg(yv)), 1), context=ctx, maneuver=maneuver,
+                   occluded=bool(v["in_fov"] and not vis), view=view, yaw_offset_deg=round(float(off), 1),
+                   source=kind, scenery_px=int(v["count_px"]), perception=perception,
+                   reacq=bool(reacq_ok and reacq_flag(view, vis)))
+        frames.append(f)
+        return f
+
+    for sn in snaps:
+        t = sn["t_raw"]
+        if sn["visible"] and t - last < TOWN_EVERY_S - 1e-6:
+            continue
+        if (sn["context"]["unseen_for_s"] or 0.0) > TOWN_MAX_UNSEEN_S:
+            continue
+        last = t
+        lab.set_state(sn["state"])
+        pos, yaw = sn["pos"], sn["yaw"]
+        v = lab.view(pos, yaw, t)
+        f = add(sn, v, "natural", 0.0, yaw, sn["context"], oracle(pos), True, True)
+        f["seg_agrees"] = bool(v["seg_visible"] == sn["visible"])
+        for _ in range(jitter_views):
+            off = float(rng.uniform(-TOWN_JITTER_DEG, TOWN_JITTER_DEG))
+            yv = yaw + np.deg2rad(off)
+            add(sn, lab.view(pos, yv, t), "jitter", off, yv, sn["context"], None, True, False)
+        cam = pos + lab.eye.NOSE_OFFSET_M * np.array([np.cos(yaw), np.sin(yaw), 0.0])
+        if rng.random() < rot_p:
+            b3_nat, _ = _rel(cam, yaw, rover_at(t + probe.REAPPEAR_HORIZON_S))
+            off = _wrap_deg(b3_nat - _view_bearing(rng))
+            yv = yaw + np.deg2rad(off)
+            rv = lab.view(pos, yv, t)
+            if rv["seg_visible"]:
+                ctx = {"unseen_for_s": 0.0, "last_seen_bearing_deg": round(rv["seg_bearing_deg"], 1),
+                       "last_seen_range_m": rv["seg_range_m"]}
+            else:
+                u = float(rng.uniform(*V3B_LAG_S))
+                i = int(np.searchsorted(sight_t[:sn["n_sightings"]], t - u, side="right")) - 1
+                if i < 0:
+                    ctx = {"unseen_for_s": None, "last_seen_bearing_deg": None, "last_seen_range_m": None}
+                else:
+                    ts, bs, rs, ys = sightings[i]
+                    ctx = {"unseen_for_s": round(t - ts, 2),
+                           "last_seen_bearing_deg": round(_wrap_deg(bs - np.rad2deg(yv - ys)), 1),
+                           "last_seen_range_m": round(rs, 2)}
+            add(sn, rv, "rotated", off, yv, ctx, None, False, True)
+        if rng.random() < scenery_p:
+            near = [(n, x, y) for n, x, y in sc_geoms if 3.0 <= np.hypot(x - cam[0], y - cam[1]) <= 20.0]
+            if near:
+                n, x, y = near[int(rng.integers(len(near)))]
+                yv = float(np.arctan2(y - cam[1], x - cam[0])) + np.deg2rad(rng.uniform(-15.0, 15.0))
+                off = _wrap_deg(np.rad2deg(yv - yaw))
+                sv = lab.view(pos, yv, t)
+                if sv["count_px"] >= TOWN_SCENERY_MIN_PX:
+                    add(sn, sv, "scenery", off, yv, sn["context"], None, True, False)["scenery_target"] = n
+    return frames
+
+
+def town_frame_labels(f):
+    """The truth fields of a town record / probe row: v3's plus view, yaw_offset_deg, source, scenery_px."""
+    return dict(v3_frame_labels(f), view=f["view"], yaw_offset_deg=f["yaw_offset_deg"], source=f["source"],
+                scenery_px=f["scenery_px"], perception=f["perception"], reacq=f["reacq"])
+
+
+def records_town(frames, image_dir, rel_prefix="images"):
+    """Write the frames' images and return their records: probe.questions_v2's visible / where / steer7 /
+    range8 (soft targets, as v2_records) on perception views, probe.questions_v3's occluded / reappear /
+    reappear_eta (as records_v3) on reacq views."""
+    os.makedirs(image_dir, exist_ok=True)
+    q2, q3 = probe.questions_v2(), probe.questions_v3()
+    rea = list(probe.REAPPEAR)
+    recs = []
+    for f in frames:
+        stem = f["stem"]
+        open(os.path.join(image_dir, stem + ".jpg"), "wb").write(f["jpeg"])
+        base = dict(image="%s/%s.jpg" % (rel_prefix, stem), **town_frame_labels(f))
+        vis = f["visible"]
+        if f["perception"] or f["view"] == "rotated":
+            recs.append(dict(base, id=stem + "-visible", question=q2["visible"], label=int(vis)))
+        if f["perception"]:
+            recs.append(dict(base, id=stem + "-where", question=q2["where"], label=_where(vis, f["bearing_deg"])))
+            if vis:
+                t = soft_target(f["bearing_deg"], probe.STEER7_CENTRES)
+                recs.append(dict(base, id=stem + "-steer7", question=q2["steer7"], label=int(np.argmax(t)), target=t))
+                t = soft_target(f["range_m"], probe.RANGE8_CENTRES)
+                recs.append(dict(base, id=stem + "-range8", question=q2["range8"], label=int(np.argmax(t)), target=t))
+        if f["reacq"]:
+            recs.append(dict(base, id=stem + "-occluded", question=q3["occluded"], label=int(f["occluded"])))
+            recs.append(dict(base, id=stem + "-reappear", question=q3["reappear"], label=rea.index(f["reappear"])))
+            if not vis:
+                eta = probe.REAPPEAR_ETA_EDGES[-1] + 5.0 if f["eta_s"] is None else f["eta_s"]
+                recs.append(dict(base, id=stem + "-reappear_eta", question=q3["reappear_eta"],
+                                 label=eta_level(f["eta_s"]), target=soft_target(eta, ETA_CENTRES)))
+    return recs
+
+
+def town_counts(recs):
+    """label_counts per view type, and the visible hard-negative count (red scenery in view, no rover)."""
+    import collections
+    out = {"labels": label_counts(recs), "by_view": {}}
+    for v in sorted({r["view"] for r in recs}):
+        out["by_view"][v] = label_counts([r for r in recs if r["view"] == v])
+    vis = [r for r in recs if r["id"].endswith("-visible")]
+    out["visible_hard_negatives"] = sum(1 for r in vis if not r["visible"] and r["scenery_px"] >= TOWN_SCENERY_MIN_PX)
+    out["visible_with_scenery_and_rover"] = sum(1 for r in vis if r["visible"] and r["scenery_px"] >= TOWN_SCENERY_MIN_PX)
+    out["frames_by_view"] = dict(collections.Counter(r["view"] for r in vis))
+    return out

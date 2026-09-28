@@ -198,7 +198,14 @@ LAYOUTS = {
     # decoy at 40, not 36: the first pocket's rover path runs back to the centre line by x = 35, and
     # a decoy approach starting before that made the rover jump 4.7 m sideways at x = 35
     "no-climb": ([("pocket", 16.0), ("decoy", 40.0), ("pocket", 54.0)], 74.0),
+    # beams and pockets alternating, then a decoy: the low beam (climb) and the pocket's low front wall
+    # (hold_course) seen again and again, for the drone_rover_tac maneuver data. Spacings copy the other
+    # layouts (beam -> pocket 10 m as on pockets, pocket -> beam 22 m as on mixed, beam -> decoy 10 m as on
+    # mixed). The rover reaches end_x at ~85 s: fly it TACTICS_SECONDS.
+    "tactics": ([("beam", 16.0), ("pocket", 26.0), ("beam", 48.0), ("pocket", 58.0), ("beam", 80.0),
+                 ("decoy", 90.0)], 104.0),
 }
+TACTICS_SECONDS = 110.0
 # The rover reaches the end of the longest course at about t = 68 s; fly them for 90 s.
 SECONDS = 90.0
 

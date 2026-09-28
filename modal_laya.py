@@ -459,6 +459,103 @@ def test_frames_v3b_job(course: str, seed: int, kind: str):
     return json.dumps(rows, default=float), blobs
 
 
+# --- v3.2: drone_rover_tac (maneuver: beams vs pocket walls) and drone_rover_town (town perception + reacquisition)
+ROVER_SET_TAC = ROVER_SET + "_tac"
+ROVER_SET_TOWN = ROVER_SET + "_town"
+
+
+@app.function(cpu=1, timeout=120, volumes={"/data": data_vol})
+def rover_set_ready(name: str):
+    return os.path.exists("/data/vqa/%s/_READY" % name)
+
+
+@app.function(cpu=2, memory=4096, timeout=50 * 60, volumes={"/data": data_vol})
+def collect_tac_job(course: str, seed: int, split: str):
+    """One oracle flight -> its tac frames' images on the datasets volume, and their maneuver records
+    (rover_data.collect_flight_tac / records_tac)."""
+    _enter()
+    import rover_data
+    frames = rover_data.collect_flight_tac(course, seed)
+    recs = rover_data.records_tac(frames, "/data/vqa/%s/images" % ROVER_SET_TAC)
+    data_vol.commit()
+    return json.dumps([dict(r, split=split) for r in recs], default=float)
+
+
+@app.function(cpu=2, memory=8192, timeout=60 * 60, volumes={"/data": data_vol})
+def collect_town_job(seed: int, kind: str, split: str, seconds: float = 0.0):
+    """One town flight (code pursuit or a rover_data.TOWN_FAILURE stand-in) -> its views' images and records
+    (rover_data.collect_flight_town / records_town)."""
+    _enter()
+    import rover_data
+    frames = rover_data.collect_flight_town(seed, kind, seconds or None)
+    recs = rover_data.records_town(frames, "/data/vqa/%s/images" % ROVER_SET_TOWN)
+    data_vol.commit()
+    return json.dumps([dict(r, split=split) for r in recs], default=float)
+
+
+@app.function(cpu=1, memory=8192, timeout=15 * 60, volumes={"/data": data_vol})
+def finalize_rover_set_v32(name: str, recs_json: list, meta: dict):
+    """Balance per split (tac: rover_data.balance_tac; town: balance_reappear), write <split>.jsonl, meta.json,
+    _READY last. Create-only."""
+    _enter()
+    import collections, rover_data
+    base = "/data/vqa/%s" % name
+    data_vol.reload()
+    if os.path.exists(os.path.join(base, "_READY")):
+        raise SystemExit("%s already exists; refusing to overwrite" % base)
+    by = collections.defaultdict(list)
+    for chunk in recs_json:
+        for r in json.loads(chunk):
+            by[r.pop("split")].append(r)
+    counts, report = {}, {}
+    for split, rs in sorted(by.items()):
+        seed = 0 if split == "train" else 1
+        if name == ROVER_SET_TAC:
+            pre = rover_data.tac_counts(rs)
+            rs, before, after = rover_data.balance_tac(rs, seed=seed)
+            report[split] = {"before_balance": pre, "groups_before": before, "groups_after": after,
+                             "after_balance": rover_data.tac_counts(rs),
+                             "by_course": {c: rover_data.tac_counts([r for r in rs if r["course"] == c])["groups"]
+                                           for c in sorted({r["course"] for r in rs})}}
+        else:
+            rs = rover_data.balance_reappear(rs, seed=seed)
+            report[split] = rover_data.town_counts(rs)
+        with open(os.path.join(base, split + ".jsonl"), "w") as f:
+            for r in rs:
+                f.write(json.dumps(r) + "\n")
+        counts[split] = len(rs)
+    json.dump(dict(meta, counts=counts, report=report), open(os.path.join(base, "meta.json"), "w"), indent=1)
+    open(os.path.join(base, "_READY"), "w").close()      # last: the loaders skip a set without it
+    data_vol.commit()
+    return counts, report
+
+
+@app.function(cpu=2, memory=4096, timeout=50 * 60)
+def test_frames_tac_job(course: str, seed: int):
+    """Held-out tac frames in probe.py's format (rover_data.tac_frame_labels: v3 truth + station_kind)."""
+    _enter()
+    import rover_data
+    rows, blobs = [], {}
+    for k, f in enumerate(rover_data.collect_flight_tac(course, seed)):
+        name = "tac-%s-%d-%04d.jpg" % (course, seed, k)
+        blobs[name] = f["jpeg"]
+        rows.append(dict(frame=name, **rover_data.tac_frame_labels(f)))
+    return json.dumps(rows, default=float), blobs
+
+
+@app.function(cpu=2, memory=8192, timeout=60 * 60)
+def test_frames_town_job(seed: int, kind: str):
+    """Held-out town views in probe.py's format (rover_data.town_frame_labels: v2 + v3 truth, view, scenery_px)."""
+    _enter()
+    import rover_data
+    rows, blobs = [], {}
+    for f in rover_data.collect_flight_town(seed, kind):
+        name = f["stem"] + ".jpg"
+        blobs[name] = f["jpeg"]
+        rows.append(dict(frame=name, **rover_data.town_frame_labels(f)))
+    return json.dumps(rows, default=float), blobs
+
+
 @app.function(cpu=1, timeout=120, volumes={"/data": data_vol})
 def rover_set_exists():
     return os.path.exists("/data/vqa/%s/_READY" % ROVER_SET)
@@ -671,6 +768,112 @@ def rover_test_frames_v3b(courses: str = "no-climb,no-climb,no-climb,mixed,mixed
             src, len(rr), dict(collections.Counter(r["reappear"] for r in rr)),
             dict(collections.Counter(r["occluded"] for r in rr)), dict(collections.Counter(r["eta_level"] for r in rr))))
     print("  all lost reappear:", dict(collections.Counter(r["reappear"] for r in lost)))
+
+
+def _collect_all(fn, jobs):
+    """Spawn fn(*job) for every job; stop before finalizing if any flight failed."""
+    calls = [fn.spawn(*j) for j in jobs]
+    out = []
+    for j, fc in zip(jobs, calls):
+        r = _get(fc)
+        if isinstance(r, Exception):
+            print("FAILED", j, repr(r)[:300], flush=True)
+            continue
+        out.append(r)
+        print("collected", *j, len(json.loads(r)), "records", flush=True)
+    if len(out) < len(jobs):
+        raise SystemExit("%d of %d flights failed; not finalizing (images stay; rerun after a fix)"
+                         % (len(jobs) - len(out), len(jobs)))
+    return out
+
+
+# seeds the v3.2 sets never train on: evaluation flights use 0-23 on mixed / no-climb; the tac test set uses
+# mixed 24-27, no-climb 24-25, tactics 0-3; the town test set and town evaluation use town seeds 0-9
+TAC_HELD_OUT = {"mixed": range(0, 28), "no-climb": range(0, 50), "tactics": range(0, 4), "town": range(0, 10)}
+
+
+@app.local_entrypoint()
+def build_rover_set_tac(train_seeds: str = "30,31,32,33,34,35,36,37,38,39,40,41,42,43,44,45",
+                        val_seeds: str = "46,47,48,49", courses: str = "classic,pockets,mixed,tactics"):
+    """Write /data/vqa/drone_rover_tac (create-only): maneuver-only oracle flights (rover_data.collect_flight_tac),
+    dense near beams and pocket walls, balanced climb : pocket-hold : other-hold ~ 1:1:1 per split."""
+    if rover_set_ready.remote(ROVER_SET_TAC):
+        raise SystemExit("/data/vqa/%s already exists; refusing to overwrite" % ROVER_SET_TAC)
+    jobs = [(c, int(s), sp) for sp, seeds in (("train", train_seeds), ("val", val_seeds))
+            for c in courses.split(",") for s in seeds.split(",")]
+    assert not any(s in TAC_HELD_OUT.get(c, ()) for c, s, _ in jobs), "held-out seed in the training jobs"
+    out = _collect_all(collect_tac_job, jobs)
+    counts, report = finalize_rover_set_v32.remote(ROVER_SET_TAC, out, {
+        "source": "jev-drone rover_data.collect_flight_tac / records_tac / balance_tac", "courses": courses,
+        "train_seeds": train_seeds, "val_seeds": val_seeds})
+    print("wrote /data/vqa/%s:" % ROVER_SET_TAC, counts)
+    print(json.dumps(report, indent=1))
+
+
+@app.local_entrypoint()
+def build_rover_set_town(train_seeds: str = "10,11,12,13,14,15,16,17,18,19", val_seeds: str = "20,21",
+                         train_sim: str = "10:sim8,11:sim8,12:sim8,13:sim8,14:sim10,15:sim10",
+                         val_sim: str = "20:sim8"):
+    """Write /data/vqa/drone_rover_town (create-only): code-pursuit town flights on the seeds, plus the
+    `seed:kind` failure flights (rover_data.TOWN_FAILURE stand-ins, which lose the rover)
+    (rover_data.collect_flight_town / records_town). Town seeds 0-9 are held out for evaluation."""
+    if rover_set_ready.remote(ROVER_SET_TOWN):
+        raise SystemExit("/data/vqa/%s already exists; refusing to overwrite" % ROVER_SET_TOWN)
+    jobs = []
+    for sp, seeds, sims in (("train", train_seeds, train_sim), ("val", val_seeds, val_sim)):
+        jobs += [(int(s), "code", sp) for s in seeds.split(",") if s]
+        jobs += [(int(x.split(":")[0]), x.split(":")[1], sp) for x in sims.split(",") if x]
+    assert not any(s in TAC_HELD_OUT["town"] for s, _, _ in jobs), "town seeds 0-9 are held out"
+    out = _collect_all(collect_town_job, jobs)
+    counts, report = finalize_rover_set_v32.remote(ROVER_SET_TOWN, out, {
+        "source": "jev-drone rover_data.collect_flight_town / records_town", "train_seeds": train_seeds,
+        "val_seeds": val_seeds, "train_sim": train_sim, "val_sim": val_sim})
+    print("wrote /data/vqa/%s:" % ROVER_SET_TOWN, counts)
+    print(json.dumps(report, indent=1))
+
+
+def _write_test(out, results):
+    os.makedirs(os.path.join(out, "frames"), exist_ok=True)
+    rows = []
+    for rs, blobs in results:
+        for name, b in blobs.items():
+            open(os.path.join(out, "frames", name), "wb").write(b)
+        rows += json.loads(rs)
+    with open(os.path.join(out, "labels.jsonl"), "w") as f:
+        for r in rows:
+            f.write(json.dumps(r) + "\n")
+    return rows
+
+
+@app.local_entrypoint()
+def rover_test_frames_tac(courses: str = "mixed,mixed,mixed,mixed,no-climb,no-climb,tactics,tactics,tactics,tactics",
+                          seeds: str = "24,25,26,27,24,25,0,1,2,3", out: str = "/tmp/rover-test-tac"):
+    """Held-out tac frames (probe.py format, state_text, v3 truth + station_kind / station_dx_m): score with
+    rover_data.evaluate_v3 / score_v3 (its maneuver_tac block is score_tac)."""
+    import collections
+    jobs = list(zip(courses.split(","), [int(s) for s in seeds.split(",")]))
+    rows = _write_test(out, test_frames_tac_job.starmap(jobs))
+    print(len(rows), "frames ->", out)
+    for c in sorted({r["course"] for r in rows}):
+        rr = [r for r in rows if r["course"] == c]
+        print("  %-9s %s" % (c, dict(collections.Counter("%s/%s" % (r["station_kind"], r["maneuver"]) for r in rr))))
+
+
+@app.local_entrypoint()
+def rover_test_frames_town(seeds: str = "0,1,2,3", sim: str = "0:sim8,1:sim8", out: str = "/tmp/rover-test-town"):
+    """Held-out town views (probe.py format, state_text, v2 perception + v3 reacquisition truth, view, scenery_px):
+    score perception with probe.evaluate_v2 / score_v2 and reacquisition with rover_data.evaluate_v3 / score_v3."""
+    import collections
+    jobs = [(int(s), "code") for s in seeds.split(",") if s] + [(int(x.split(":")[0]), x.split(":")[1])
+                                                                for x in sim.split(",") if x]
+    rows = _write_test(out, test_frames_town_job.starmap(jobs))
+    lost = [r for r in rows if not r["visible"]]
+    print(len(rows), "views,", len(lost), "with the rover out of sight ->", out)
+    print("  views:", dict(collections.Counter(r["view"] for r in rows)))
+    print("  hard negatives (red scenery, no rover):",
+          sum(1 for r in lost if r["scenery_px"] >= 20))
+    print("  lost reappear:", dict(collections.Counter(r["reappear"] for r in lost if r["reacq"])))
+    print("  lost occluded:", dict(collections.Counter(r["occluded"] for r in lost if r["reacq"])))
 
 
 @app.local_entrypoint()
