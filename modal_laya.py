@@ -125,14 +125,21 @@ def fly_gif(config: str, seed: int, seconds: float, course: str, budget: int = 0
 
 
 @app.function(gpu=["L4", "A10G"], cpu=4, memory=16384, timeout=60 * 60, volumes={"/cache/hf": hf_vol})
-def probe_remote(frames: dict, rows: list, model: str = "", n_permutations: int = 1):
-    """probe.py: ask Laya where the rover is in each recorded frame."""
+def probe_remote(frames: dict, rows: list, model: str = "", n_permutations: int = 1, mode: str = "full",
+                 n_strips: int = 5):
+    """probe.py: ask Laya where the rover is in each recorded frame, from the whole frame ("full") or one
+    yes/no per vertical strip ("strips")."""
     _enter()
     import laya, probe
     agent = laya.load_vlm(model or "thaitea/laya-vision", option_max_len=256, head_max_len=1024, max_len=3072)
-    preds = probe.evaluate(agent, frames, rows, n_permutations)
+    if mode == "strips":
+        preds = probe.evaluate_strips(agent, frames, rows, n_strips)
+        summary = probe.score_strips(preds, n_strips)
+    else:
+        preds = probe.evaluate(agent, frames, rows, n_permutations)
+        summary = probe.score(preds)
     # as JSON text: numpy scalars would not unpickle where the Modal client has no numpy
-    return json.dumps(preds, default=float), json.dumps(probe.score(preds), default=float)
+    return json.dumps(preds, default=float), json.dumps(summary, default=float)
 
 
 def _outdir():
@@ -182,14 +189,15 @@ def gifs(config: str = "laya-image", courses: str = "pockets,mixed", seeds: str 
 
 
 @app.local_entrypoint()
-def probe(frames: str = "/tmp/probe", model: str = "", n_permutations: int = 1):
+def probe(frames: str = "/tmp/probe", model: str = "", n_permutations: int = 1, mode: str = "full",
+          n_strips: int = 5):
     """Score zero-shot Laya on frames from `python probe.py collect --out <frames>`."""
     rows = [json.loads(l) for l in open(os.path.join(frames, "labels.jsonl"))]
     blobs = {r["frame"]: open(os.path.join(frames, "frames", r["frame"]), "rb").read() for r in rows}
-    preds, summary = (json.loads(x) for x in probe_remote.remote(blobs, rows, model, n_permutations))
+    preds, summary = (json.loads(x) for x in probe_remote.remote(blobs, rows, model, n_permutations, mode, n_strips))
     d = os.path.join(HERE, "results", "probe")
     os.makedirs(d, exist_ok=True)
-    tag = "perm%d" % n_permutations
+    tag = "strips%d" % n_strips if mode == "strips" else "perm%d" % n_permutations
     with open(os.path.join(d, "preds-%s.jsonl" % tag), "w") as f:
         for p in preds:
             f.write(json.dumps(p) + "\n")
