@@ -100,18 +100,21 @@ class Guidance:
         best = max(names, key=lambda n: sec[n])
         return self.eye.sector_bearing(best)
 
-    def __call__(self, scene, judg, yaw, z, use_jev, fresh=False, t=0.0, pos=None):
+    def __call__(self, scene, judg, yaw, z, use_jev, fresh=False, t=0.0, pos=None, fix=None):
+        """`fix`: the target as another perception sees it (laya_pursuit.Locator), in the shape of
+        scene["target"]; it replaces the camera's for pursuit only. Its range_m is the code's, and
+        None when only the model sees the rover: then hold the not-visible speed."""
         if self.yaw_sp is None:
             self.yaw_sp = yaw
         sec = scene["sector_range_m"]
-        tgt = scene["target"]
+        tgt = scene["target"] if fix is None else fix
 
         if tgt["visible"]:
             self.last_bearing = np.deg2rad(tgt["bearing_deg"])
-            rng = tgt["range_m"]
+            rng = tgt["range_m"] if tgt["range_m"] is not None else STANDOFF + 1.5
             self.lost_for = 0.0
             self.search_yaw = None
-            if fresh and pos is not None:
+            if fresh and pos is not None and tgt["range_m"] is not None:
                 b = self.last_bearing
                 c, s = np.cos(yaw), np.sin(yaw)
                 off = np.array([rng * np.cos(b), rng * np.sin(b)])
@@ -235,10 +238,17 @@ class Guidance:
 
 
 def episode(seed=0, seconds=35.0, use_jev=True, video=None, hz=None, budget=None, realtime=True,
-            backend="jev", laya_model=None, laya_image=False, lockstep=False, course="classic", record=None):
+            backend="jev", laya_model=None, laya_image=False, lockstep=False, course="classic", record=None,
+            pursuit="code", pursuit_model=None, pursuit_threshold=0.5, pursuit_noise_deg=0.0,
+            pursuit_delay_s=0.0, pursuit_lockstep=False):
     """`record`: a list to append a snapshot to every 0.2 s of sim time (pose, obstacles,
     judgment, and the camera frame the model saw), for rendering after the flight
-    (flightgif.py). Cheap, so the flight stays real time."""
+    (flightgif.py). Cheap, so the flight stays real time.
+
+    `pursuit`: where the pursuit HEADING comes from. "code" (the segmentation bearing),
+    "laya-strips" / "laya-frame" (Laya on the RGB frame, laya_pursuit.py), or "sim" (the true
+    bearing + `pursuit_noise_deg` noise, `pursuit_delay_s` late: a model-free stand-in). Range, and
+    so forward speed, stays the code's in every mode; Laya's speed answer is not trained well yet."""
     rng = np.random.default_rng(seed)
     if course == "classic":
         m = mujoco.MjModel.from_xml_path("world.xml")
@@ -258,8 +268,15 @@ def episode(seed=0, seconds=35.0, use_jev=True, video=None, hz=None, budget=None
     mujoco.mj_forward(m, d)
 
     pilot = flight.Pilot(m)
-    eye = flight.Eye(m, rgb_size=(512, 384) if (use_jev and laya_image) else None)
+    eye = flight.Eye(m, rgb_size=(512, 384) if ((use_jev and laya_image) or pursuit.startswith("laya")) else None)
     guide = Guidance(eye)
+    loc = None
+    if pursuit != "code":
+        import laya_pursuit
+        loc = laya_pursuit.Locator(
+            laya_pursuit.make_locator_backend(pursuit, pursuit_model, pursuit_threshold, pursuit_noise_deg,
+                                              pursuit_delay_s, seed),
+            truth=lambda: laya_pursuit.true_fix(m, d, scene), lockstep=pursuit_lockstep)
     tac = None
     if use_jev:
         from tactics import Tactician, DEFAULT, make_backend
@@ -292,6 +309,7 @@ def episode(seed=0, seconds=35.0, use_jev=True, video=None, hz=None, budget=None
     vis, frames, standoffs, hits, hit_steps, grounded = 0, 0, [], 0, set(), 0
     crashed_at, max_x, crossed, finished_at = None, -99.0, False, None
     jev_steps = reflex_steps = 0
+    fix, fix_steps, guide_steps = None, 0, 0
     n = int(seconds / dt)
 
     wall0 = time.time()
@@ -320,6 +338,11 @@ def episode(seed=0, seconds=35.0, use_jev=True, video=None, hz=None, budget=None
                 tac.offer(scene, t, eye.last_rgb)
                 if lockstep and realtime:
                     wall0 += time.time() - t_off   # the world waited for the model
+            if loc:
+                t_off = time.time()
+                loc.offer(eye.last_rgb, t, yaw, scene["target"]["bearing_deg"])
+                if pursuit_lockstep and realtime:
+                    wall0 += time.time() - t_off
 
         if i % 10 == 0 and scene:                        # 50 Hz guidance
             if tac:
@@ -332,7 +355,14 @@ def episode(seed=0, seconds=35.0, use_jev=True, video=None, hz=None, budget=None
                              scene["sectors_blocked"], scene["nearest_obstacle_m"],
                              scene["free_ahead_above_m"], scene["target"]["visible"]),
                           flush=True)
-            v_des, yaw_cmd, acted, reflex = guide(scene, judg, yaw, pos[2], use_jev, fresh, t, pos)
+            if loc:
+                # the model's heading, the code's range (None where only the model sees the rover)
+                est = loc.read(t, yaw)
+                fix = {"visible": est["visible"], "bearing_deg": est["bearing_deg"],
+                       "range_m": scene["target"]["range_m"], "unseen_for_s": est["unseen_for_s"]}
+                fix_steps += est["visible"]
+                guide_steps += 1
+            v_des, yaw_cmd, acted, reflex = guide(scene, judg, yaw, pos[2], use_jev, fresh, t, pos, fix)
             if TRACE >= 2 and i % 250 == 0:
                 sec = scene["sector_range_m"]
                 print("    t=%5.1f pos=(%5.1f,%5.1f,%4.1f) yaw=%4.0f mv=%-11s commit=%-11s reflex=%d v=(%4.1f,%4.1f,%4.1f)"
@@ -419,6 +449,14 @@ def episode(seed=0, seconds=35.0, use_jev=True, video=None, hz=None, budget=None
     if tac:
         out["jev"] = tac.stats()
         tac.close()
+    out["pursuit"] = pursuit
+    if loc:
+        st = loc.stats()
+        loc.close()
+        # used = a fresh, visible estimate set the pursuit heading on that guidance step
+        out.update(pursuit_used_pct=round(100 * fix_steps / max(guide_steps, 1), 1),
+                   pursuit_bearing_mae_deg=st["bearing_mae_deg"], pursuit_median_latency_s=st["median_latency_s"],
+                   pursuit_p90_latency_s=st["p90_latency_s"], locator=st)
     return out
 
 
@@ -437,10 +475,19 @@ if __name__ == "__main__":
     p.add_argument("--lockstep", action="store_true", help="pause the sim while the model decides (no latency)")
     p.add_argument("--out", default=None, help="append one JSON line per episode to this file")
     p.add_argument("--course", default="classic", help="classic (world.xml) or a layout in courses.py")
+    p.add_argument("--pursuit", default="code", choices=["code", "laya-strips", "laya-frame", "sim"],
+                   help="source of the pursuit heading (range/speed stay the code's)")
+    p.add_argument("--pursuit-model", default=None, help="Laya checkpoint for laya-* pursuit (default: tactics.LAYA_MODEL)")
+    p.add_argument("--pursuit-threshold", type=float, default=0.5, help="P(visible) needed to steer on an estimate")
+    p.add_argument("--pursuit-noise", type=float, default=0.0, help="sim pursuit: bearing noise std (deg)")
+    p.add_argument("--pursuit-delay", type=float, default=0.0, help="sim pursuit: answer latency (sim s)")
+    p.add_argument("--pursuit-lockstep", action="store_true", help="pause the sim while the locator looks")
     a = p.parse_args()
     for s in a.seeds:
         r = episode(s, a.seconds, not a.no_jev, a.video, a.hz, a.budget, realtime=not a.fast,
-                    backend=a.backend, laya_model=a.laya_model, laya_image=a.laya_image, lockstep=a.lockstep, course=a.course)
+                    backend=a.backend, laya_model=a.laya_model, laya_image=a.laya_image, lockstep=a.lockstep, course=a.course,
+                    pursuit=a.pursuit, pursuit_model=a.pursuit_model, pursuit_threshold=a.pursuit_threshold,
+                    pursuit_noise_deg=a.pursuit_noise, pursuit_delay_s=a.pursuit_delay, pursuit_lockstep=a.pursuit_lockstep)
         print(json.dumps(r))
         sys.stdout.flush()
         if a.out:

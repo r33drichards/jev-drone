@@ -10,6 +10,8 @@ The laya package comes from a local checkout of laya-vision, LAYA_DIR (default
     modal run modal_laya.py::scenes                         # the 7 hand-built scenes, text only
     modal run modal_laya.py::baseline --seeds 0,1,2          # every flight configuration below, in parallel
     modal run modal_laya.py::baseline --configs laya-image --seeds 1 --seconds 65
+    modal run modal_laya.py::baseline --configs code-pursuit-oracle,laya-steer-strips,laya-steer-frame \
+        --courses mixed --seconds 90 --model /ckpt/smolvlm/<run>/best     # Laya steers the pursuit
 
 Results land in results/laya/<timestamp>/ as JSON lines, one per episode.
 """
@@ -39,7 +41,7 @@ data_vol = modal.Volume.from_name("laya-datasets")
 ckpt_vol = modal.Volume.from_name("laya-checkpoints")   # fine-tuned runs: pass --model /ckpt/smolvlm/<run>/best
 ROVER_SET = "drone_rover"          # /data/vqa/drone_rover on laya-datasets, for laya-vision's finetune_long
 
-# name -> (use the model?, backend, laya sees the camera frame, lockstep)
+# name -> (use the model?, backend, laya sees the camera frame, lockstep[, pursuit kwargs for run.episode])
 CONFIGS = {
     "no-model": (False, "laya", False, False),   # the ablation: greedy heuristic, never consults a model
     "laya-text": (True, "laya", False, False),   # the same JSON Jev gets
@@ -51,7 +53,29 @@ CONFIGS = {
     "always-gap-left": (True, "const:gap_left", False, False),
     "always-gap-right": (True, "const:gap_right", False, False),
     "oracle": (True, "const:oracle", False, False),        # the right answer from the layout: is it flyable?
+    # Laya steers the pursuit from the RGB frame (laya_pursuit.py); tactics are the oracle, so only the
+    # pursuit heading differs from code-pursuit-oracle. --model is the pursuit checkpoint. Courses from
+    # courses.py only (the oracle needs a layout): --courses mixed,pockets,no-climb
+    "code-pursuit-oracle": (True, "const:oracle", False, False, {"pursuit": "code"}),   # the baseline
+    "laya-steer-strips": (True, "const:oracle", False, False, {"pursuit": "laya-strips"}),
+    "laya-steer-frame": (True, "const:oracle", False, False, {"pursuit": "laya-frame"}),
+    "laya-steer-strips-lockstep": (True, "const:oracle", False, False, {"pursuit": "laya-strips", "pursuit_lockstep": True}),
+    # model-free stand-ins (CPU): the true bearing, then with a strips-like 0.2 s latency and ~6 deg noise
+    "sim-steer": (True, "const:oracle", False, False, {"pursuit": "sim"}),
+    "sim-steer-noisy": (True, "const:oracle", False, False,
+                        {"pursuit": "sim", "pursuit_noise_deg": 6.0, "pursuit_delay_s": 0.2}),
 }
+
+
+def _config(name):
+    """(use_model, backend, img, lockstep, pursuit kwargs); the older 4-tuples fly code pursuit."""
+    c = CONFIGS[name]
+    return tuple(c[:4]) + (dict(c[4]) if len(c) > 4 else {},)
+
+
+def _needs_gpu(name):
+    use_model, backend, _, _, pk = _config(name)
+    return (use_model and not backend.startswith("const:")) or pk.get("pursuit", "code").startswith("laya")
 
 
 def _enter():
@@ -85,10 +109,11 @@ def scenes_remote(model: str = "", variants=(("full budgets, no image", []),)):
 def fly(config: str, seed: int, seconds: float, model: str = "", course: str = "classic", budget: int = 0):
     _enter()
     import run
-    use_model, backend, img, lockstep = CONFIGS[config]
+    use_model, backend, img, lockstep, pk = _config(config)
     t0 = time.time()
     r = run.episode(seed, seconds, use_jev=use_model, backend=backend, laya_model=model or None,
-                    laya_image=img, lockstep=lockstep, course=course, budget=budget or None)
+                    laya_image=img, lockstep=lockstep, course=course, budget=budget or None,
+                    pursuit_model=model or None, **pk)
     r.update(config=config, wall_s=round(time.time() - t0, 1))
     try:
         import torch
@@ -100,7 +125,7 @@ def fly(config: str, seed: int, seconds: float, model: str = "", course: str = "
 
 @app.function(cpu=4, memory=8192, timeout=60 * 60)
 def fly_cpu(config: str, seed: int, seconds: float, model: str = "", course: str = "classic", budget: int = 0):
-    """The controls (no-model, const:*) never load a model, so they need no GPU."""
+    """The controls (no-model, const:*, sim pursuit) never load a model, so they need no GPU."""
     return fly.local(config, seed, seconds, model, course, budget)
 
 
@@ -117,10 +142,11 @@ def fly_gif(config: str, seed: int, seconds: float, course: str, budget: int = 0
     """fly(), recording the flight, then render it as a GIF (flightgif.py) after the flight ends."""
     _enter()
     import run, flightgif
-    use_model, backend, img, lockstep = CONFIGS[config]
+    use_model, backend, img, lockstep, pk = _config(config)
     rec = []
     r = run.episode(seed, seconds, use_jev=use_model, backend=backend, laya_model=model or None,
-                    laya_image=img, lockstep=lockstep, course=course, budget=budget or None, record=rec)
+                    laya_image=img, lockstep=lockstep, course=course, budget=budget or None, record=rec,
+                    pursuit_model=model or None, **pk)
     r.update(config=config)
     outcome = "finished" if r["finished_at_s"] is not None else "stopped at x=%.0f m" % r["max_x_m"]
     title = "%s  |  %s seed %d  |  %s" % (config, course, seed, outcome)
@@ -222,12 +248,12 @@ def courses_png(names: str = "pockets,mixed,no-climb", seed: int = 0):
 
 @app.local_entrypoint()
 def gifs(config: str = "laya-image", courses: str = "pockets,mixed", seeds: str = "0,1,2,3,4,5",
-         seconds: float = 90.0, budget: int = 240):
+         seconds: float = 90.0, budget: int = 240, model: str = ""):
     """Fly and record every (course, seed); write docs/gifs/<config>-<course>-<seed>-<outcome>.gif."""
     d = os.path.join(HERE, "docs", "gifs")
     os.makedirs(d, exist_ok=True)
     jobs = [(k, int(s)) for k in courses.split(",") for s in seeds.split(",")]
-    calls = [fly_gif.spawn(config, s, seconds, k, budget) for k, s in jobs]
+    calls = [fly_gif.spawn(config, s, seconds, k, budget, model) for k, s in jobs]
     out = _outdir()
     for (k, s), fc in zip(jobs, calls):
         res = _get(fc)
@@ -318,8 +344,7 @@ def baseline(configs: str = "no-model,laya-text,laya-image,laya-text-lockstep", 
     jobs = [(c, int(s), k) for k in courses.split(",") for c in configs.split(",") for s in seeds.split(",")]
     d = _outdir()
     path = os.path.join(d, "episodes.jsonl")
-    gpu = lambda c: CONFIGS[c][0] and not CONFIGS[c][1].startswith("const:")  # noqa: E731
-    calls = [(fly if gpu(c) else fly_cpu).spawn(c, s, seconds, model, k, budget) for c, s, k in jobs]
+    calls = [(fly if _needs_gpu(c) else fly_cpu).spawn(c, s, seconds, model, k, budget) for c, s, k in jobs]
     for r in (_get(fc) for fc in calls):
         if isinstance(r, Exception):
             print("FAILED:", repr(r)[:300])
@@ -327,8 +352,11 @@ def baseline(configs: str = "no-model,laya-text,laya-image,laya-text-lockstep", 
         with open(path, "a") as f:
             f.write(json.dumps(r) + "\n")
         st = r["jev"] if isinstance(r["jev"], dict) else {}
-        print("%-9s %-20s seed=%d fin=%-5s max_x=%5.1f crossed=%-5s vis=%4.1f%% reflex=%4.1f%% hits=%d rt=%.2f calls=%s med=%s"
+        print("%-9s %-26s seed=%d fin=%-5s max_x=%5.1f crossed=%-5s vis=%4.1f%% reflex=%4.1f%% hits=%d rt=%.2f calls=%s med=%s%s"
               % (r.get("course", "classic"), r["config"], r["seed"], r.get("finished_at_s"), r["max_x_m"], r["crossed_barrier"], r["target_visible_pct"],
                  r["steps_reflex_pct"], r["collisions"], r["realtime_factor"], st.get("calls"),
-                 st.get("median_latency_s")), flush=True)
+                 st.get("median_latency_s"),
+                 "" if r.get("pursuit", "code") == "code" else " | steer=%s used=%s%% mae=%s lat=%s/%s"
+                 % (r["pursuit"], r.get("pursuit_used_pct"), r.get("pursuit_bearing_mae_deg"),
+                    r.get("pursuit_median_latency_s"), r.get("pursuit_p90_latency_s"))), flush=True)
     print("wrote", path)
