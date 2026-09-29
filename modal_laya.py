@@ -229,6 +229,11 @@ CONFIGS["laya-full-wc-rate"] = CONFIGS["laya-full-v3.3-wc-rate"]
 # in the altitude predict at 6 Hz); the code keeps only an emergency reflex under 1 m. Wall clock.
 CONFIGS["laya-full-wc-avoid"] = CONFIGS["laya-full-wc-rate"][:4] + (
     dict(CONFIGS["laya-full-wc-rate"][4], avoid="laya"),)
+# the student flies by command (command.py; trained on the lookahead teacher): --model answers the commands and
+# the altitude; wall clock, yaw-rate cap
+CONFIGS["laya-cmd-wc"] = (True, "const:hold_course", False, False,
+                          {"pursuit": "code", "altitude": "laya", "policy": "laya-cmd", "timing": "wallclock",
+                           "guide_tune": {"yaw_rate_dps": 120.0}})
 # a looser yaw-rate cap for the fast town (the rover's bearing can swing faster than 120 deg/s round a corner)
 CONFIGS["laya-full-wc-rate240"] = CONFIGS["laya-full-wc-rate"][:4] + (
     dict(CONFIGS["laya-full-wc-rate"][4], guide_tune={"yaw_rate_dps": 240.0}),)
@@ -592,6 +597,7 @@ ROVER_SET_TAC = ROVER_SET + "_tac"
 ROVER_SET_TOWN = ROVER_SET + "_town"
 ROVER_SET_ALT = ROVER_SET + "_alt"       # altitude.py's ascend / descend operator
 ROVER_SET_ONP = ROVER_SET + "_onpolicy"  # frames from the checkpoint's own real-time flights (DAgger)
+ROVER_SET_TEACHER = ROVER_SET + "_teacher"  # the lookahead teacher's commands as soft targets (command.py)
 ROVER_SET_CTL = ROVER_SET + "_lidar"      # every environment at 4x (+ some 1x): lidar + avoid labels
 ROVER_SET_TOWN_X4 = ROVER_SET + "_town_x4"  # town-x4 (rover 4x faster): perception / reacquisition views
 
@@ -653,6 +659,59 @@ def teacher_fly(course: str, seed: int, seconds: float):
     _enter()
     import teacher
     return json.dumps(teacher.fly(course, seed, seconds))
+
+
+@app.function(cpu=2, memory=6144, timeout=4 * 60 * 60, volumes={"/data": data_vol})
+def teacher_record_job(course: str, seed: int, seconds: float, split: str):
+    """The teacher flies one course recording every decision (teacher.fly record=True); write the frames to the
+    teacher set's images and return its cmd_speed / cmd_slide / cmd_turn records (soft targets) + a summary."""
+    _enter()
+    import teacher, command
+    r = teacher.fly(course, seed, seconds, record=True)
+    base = "/data/vqa/%s/images" % ROVER_SET_TEACHER
+    os.makedirs(base, exist_ok=True)
+    qs = command.question()
+    recs = []
+    for s in r.pop("samples"):
+        stem = "tch-%s-%d-%06.2f" % (course, seed, s["t"])
+        open(os.path.join(base, stem + ".jpg"), "wb").write(s["jpeg"])
+        st = json.dumps({k: s["context"].get(k) for k in command.CMD_KEYS})
+        for q in ("cmd_speed", "cmd_slide", "cmd_turn"):
+            tgt = s["targets"][q]
+            recs.append({"id": "%s-%s" % (stem, q), "image": "images/%s.jpg" % stem, "question": qs[q],
+                         "state_text": st, "label": int(max(range(len(tgt)), key=tgt.__getitem__)), "target": tgt,
+                         "course": course, "seed": seed, "t": s["t"], "best": s["best"], "visible": s["visible"],
+                         "split": split})
+    data_vol.commit()
+    return json.dumps(recs + [dict({k: r[k] for k in ("course", "seed", "ok", "target_visible_pct", "collisions")},
+                                   split="_flight")], default=float)
+
+
+@app.local_entrypoint()
+def build_rover_set_teacher(train: str = "mixed-x4:30-41,no-climb-x4:50-61,pockets-x4:20-31,tactics-x4:20-31,"
+                                         "town-x4:20-31,city-x4:20-31",
+                            val: str = "mixed-x4:46-47,pockets-x4:46-47,town-x4:46-47,city-x4:46-47"):
+    """Write /data/vqa/drone_rover_teacher (create-only): the lookahead teacher flies every (course, seed),
+    recording its decisions as the student's soft targets. Seeds are outside every evaluation seed."""
+    import re
+    if rover_set_ready.remote(ROVER_SET_TEACHER):
+        raise SystemExit("/data/vqa/%s already exists; refusing to overwrite" % ROVER_SET_TEACHER)
+    lengths = {"tactics": 40.0, "town": 60.0, "city": 90.0}
+
+    def parse(spec, split):
+        out = []
+        for part in spec.split(","):
+            c, rng = part.split(":")
+            a, b = (rng.split("-") + [rng])[:2]
+            base = re.sub(r"-x[\d.]+$", "", c)
+            out += [(c, s, lengths.get(base, 35.0), split) for s in range(int(a), int(b) + 1)]
+        return out
+    jobs = parse(train, "train") + parse(val, "val")
+    out = _collect_all(teacher_record_job, jobs)
+    counts, report = finalize_rover_set_v32.remote(ROVER_SET_TEACHER, out, {
+        "source": "jev-drone teacher.fly(record=True) + command.soft_targets", "train": train, "val": val})
+    print("wrote /data/vqa/%s:" % ROVER_SET_TEACHER, counts)
+    print(json.dumps(report, indent=1))
 
 
 @app.local_entrypoint()
@@ -783,6 +842,8 @@ def finalize_rover_set_v32(name: str, recs_json: list, meta: dict):
                              "after_balance": rover_data.tac_counts(rs),
                              "by_course": {c: rover_data.tac_counts([r for r in rs if r["course"] == c])["groups"]
                                            for c in sorted({r["course"] for r in rs})}}
+        elif name == ROVER_SET_TEACHER:
+            report[split] = {"records": len(rs), "flights": sum(1 for f in flights if f.get("course"))}
         elif name in (ROVER_SET_ONP, ROVER_SET_CTL):
             rs, report[split] = rover_data.balance_onpolicy(rs, seed=seed)
         elif name == ROVER_SET_ALT:

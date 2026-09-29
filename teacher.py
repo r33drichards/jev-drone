@@ -229,10 +229,17 @@ def decide(w, t):
     return CANDIDATES[int(np.argmax(scores))], scores
 
 
-def fly(course, seed=0, seconds=60.0, alt=1.6, path=True):
+def fly(course, seed=0, seconds=60.0, alt=1.6, path=True, record=False):
     """The teacher flies the course itself (the ceiling check). -> an episode-like result dict. `path`: score
-    the path distance on a NavGrid (else the straight-line distance, the first version)."""
+    the path distance on a NavGrid (else the straight-line distance, the first version). `record`: also render
+    the onboard camera and lidar at every decision (flight.Eye) and return out["samples"]: per decision the JPEG
+    frame, the command context (command.CMD_KEYS) and the soft targets (command.soft_targets)."""
     w = World(course, seed)
+    eye = None
+    if record:
+        import flight
+        eye = flight.Eye(w.m, rgb_size=(512, 384))
+    samples, prev = [], (0.0, 0.0)
     rng = np.random.default_rng(seed)
     if hasattr(w.c, "start_pose"):
         w.d.qpos[:7] = w.c.start_pose(rng, alt)
@@ -254,7 +261,13 @@ def fly(course, seed=0, seconds=60.0, alt=1.6, path=True):
     for i in range(n):
         t = i * DT
         if i % per == 0:
+            if eye is not None:
+                pos0, yaw0 = w.d.qpos[:3].copy(), _yaw(w.d.qpos[3:7])
+                scene = eye.look(w.d, pos0, yaw0, t)
             cmd, sc = decide(w, t)
+            if eye is not None:
+                samples.append(_sample(w, eye, scene, pos0, yaw0, t, sc, prev, course, seed))
+                prev = (cmd[0], samples[-1]["turn_chosen"])
             decisions.append({"t": round(t, 2), "cmd": cmd, "best": round(max(sc), 1),
                               "n_safe": int(sum(s > -500 for s in sc))})
         hit = w.step(cmd, t, i % per)
@@ -291,4 +304,25 @@ def fly(course, seed=0, seconds=60.0, alt=1.6, path=True):
     if lap is not None:
         lap.report(out, standoffs)
     out["ok"] = bool(out.get("finished_at_s") is not None or out.get("lap_done_at_s"))
+    if record:
+        out["samples"] = samples
     return out
+
+
+def _sample(w, eye, scene, pos, yaw, t, scores, prev, course, seed):
+    """One decision as a training sample for the student (command.py)."""
+    import io, command, avoid
+    from PIL import Image
+    rv = w.c.rover_pose(t)
+    to_rover = float(np.arctan2(rv[1] - pos[1], rv[0] - pos[0]))
+    turns = [float(np.rad2deg(_wrap(to_rover + np.deg2rad(c[2]) - yaw))) for c in CANDIDATES]
+    sp, rel = avoid.travel(w.d.qvel[:3], yaw)
+    ctx = {"altitude_m": round(float(pos[2]), 2), "speed_mps": round(sp, 2), "travel_deg": round(rel, 0),
+           "prev_speed": round(float(prev[0]), 1), "prev_turn": round(float(prev[1]), 0), "lidar": avoid.sensor(scene)}
+    buf = io.BytesIO()
+    Image.fromarray(eye.last_rgb).save(buf, "JPEG", quality=90)
+    best = int(np.argmax(scores))
+    return {"course": course, "seed": seed, "t": round(t, 2), "jpeg": buf.getvalue(), "context": ctx,
+            "targets": command.soft_targets(CANDIDATES, scores, turns), "best": CANDIDATES[best],
+            "turn_chosen": round(turns[best], 1), "best_score": round(float(max(scores)), 1),
+            "visible": bool(scene["target"]["visible"]), "bearing_deg": scene["target"]["bearing_deg"]}

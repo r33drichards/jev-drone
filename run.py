@@ -88,8 +88,12 @@ class Guidance:
     """
 
     def __init__(self, eye, search_lead_s=5.0, search_on_hold=False, speed_law=None, tune=None, reacq=None,
-                 speed_scale=1.0, avoid_mode=False):
+                 speed_scale=1.0, avoid_mode=False, cmd_mode=False):
         self.eye = eye
+        # cmd_mode: Laya's command (command.py: speed, slide, turn from its frame + lidar context) flies the
+        # aircraft; pursuit, reactive avoidance and the braking limit are off, the reflex only under 1 m
+        self.cmd_mode = bool(cmd_mode)
+        self.n_cmd_steps = 0
         # avoid_mode: Laya's avoid answer (avoid.py) flies collision avoidance; the code's reactive slide and
         # braking limit are off and the reflex only fires under avoid.EMERGENCY_M
         self.avoid_mode = bool(avoid_mode)
@@ -260,7 +264,7 @@ class Guidance:
         return self.eye.sector_bearing(best)
 
     def __call__(self, scene, judg, yaw, z, use_jev, fresh=False, t=0.0, pos=None, fix=None, vel=None,
-                 reappear=None, alt_sp=None, avoid_ans=None):
+                 reappear=None, alt_sp=None, avoid_ans=None, cmd=None):
         """`fix`: the target as another perception sees it (laya_pursuit.Locator), in the shape of
         scene["target"]; it replaces the camera's for pursuit only. Its range_m is the code's, and
         None when only the model sees the rover: then hold the not-visible speed -- except with a
@@ -422,8 +426,16 @@ class Guidance:
 
         # --- braking limit for a faster rover (speed_scale > 1): never faster than we can stop from in the
         # clear path ahead (BRAKE_ACC, BRAKE_MARGIN_M); off at normal speed, where the reflex below suffices
-        if self.k > 1 and not self.avoid_mode:
+        if self.k > 1 and not self.avoid_mode and not self.cmd_mode:
             fwd = min(fwd, max(0.25, float(np.sqrt(2 * BRAKE_ACC * max(0.0, scene["path_ahead_m"] - BRAKE_MARGIN_M)))))
+        if self.cmd_mode and cmd is not None and t - cmd["t"] < 0.6:
+            # the student flies its own command: forward speed, side slide and a heading set relative to the nose
+            # it had when the frame was taken
+            fwd, slide = float(cmd["speed"]), float(cmd["slide"])
+            absolute_yaw = float(cmd["yaw"]) + np.deg2rad(float(cmd["turn"]))
+            self.n_cmd_steps += 1
+        elif self.cmd_mode:                  # no fresh command: hover in place (never the code's pursuit)
+            fwd, slide, absolute_yaw = 0.0, 0.0, yaw
         if self.avoid_mode and avoid_ans is not None and t - avoid_ans[1] < 0.6:
             # Laya's graded collision avoidance (avoid.py): a safe forward speed and a sideways slide, from its
             # frame + the lidar + its speed and direction of travel
@@ -436,8 +448,9 @@ class Guidance:
         # --- hard reflex: code overrides everything, Jev included ------------------
         # Reflex on what is in the path, not on what is merely alongside.
         near, nb = scene["path_ahead_m"], np.deg2rad(scene["nearest_bearing_deg"])
-        reflex = near < (getattr(self, "emergency_m", EMERGENCY_REFLEX_M) if self.avoid_mode else REFLEX_M)
-        if reflex and self.avoid_mode:
+        reflex = near < (getattr(self, "emergency_m", EMERGENCY_REFLEX_M) if (self.avoid_mode or self.cmd_mode)
+                         else REFLEX_M)
+        if reflex and (self.avoid_mode or self.cmd_mode):
             self.n_emergency += 1
         if reflex:
             side = 1.0 if left_room > right_room else -1.0
@@ -480,7 +493,8 @@ def episode(seed=0, seconds=35.0, use_jev=True, video=None, hz=None, budget=None
             reacquire_hz=3.0, reacquire_params=None, reacquire_wrong_p=0.0, reacquire_delay_s=0.0,
             tactics_kw=None, appearance=None, altitude=None, altitude_model=None, altitude_hz=3.0,
             altitude_wrong_p=0.0, altitude_wrong=1.0, altitude_sharpen=1.0, record_rgb=False, yaw_desat=False,
-            timing="wall", record_every=100, speed_scale=None, avoid=None, avoid_hz=6.0, emergency_m=None):
+            timing="wall", record_every=100, speed_scale=None, avoid=None, avoid_hz=6.0, emergency_m=None,
+            policy=None, cmd_model=None, cmd_hz=10.0):
     """`record`: a list to append a snapshot to every 0.2 s of sim time (pose, obstacles,
     judgment, and the camera frame the model saw), for rendering after the flight
     (flightgif.py). Cheap, so the flight stays real time.
@@ -540,6 +554,10 @@ def episode(seed=0, seconds=35.0, use_jev=True, video=None, hz=None, budget=None
     predict, at `avoid_hz`, and Guidance flies that answer; the code keeps only an emergency reflex under
     EMERGENCY_REFLEX_M) or "sim" (the same with the answer from the true geometry, avoid.label). Needs altitude.
 
+    `policy`: None (default: pursuit + reactive layers) or "laya-cmd": `cmd_model` (default pursuit_model or
+    laya_model) answers command.question() -- forward speed, side slide, turn -- from each frame + the lidar
+    context at up to `cmd_hz`, and Guidance flies it (command.py; trained on the lookahead teacher, teacher.py).
+
     `speed_scale`: scale the pursuit's speeds for a rover k times faster (default: the course's own factor,
     e.g. 4 on any "<course>-x4"; Guidance speed_scale, and RangeSpeed cruise / caps / rover speed).
 
@@ -596,7 +614,7 @@ def episode(seed=0, seconds=35.0, use_jev=True, video=None, hz=None, budget=None
         raise ValueError("reacquire must be None, sim or laya, got %r" % (reacquire,))
     eye = flight.Eye(m, rgb_size=(512, 384) if ((use_jev and (laya_image or backend == "laya-v3"))
                                                 or pursuit.startswith("laya") or reacquire == "laya"
-                                                or altitude == "laya" or record_rgb) else None)
+                                                or altitude == "laya" or record_rgb or policy) else None)
     model_range = pursuit in ("laya-pursuit", "sim-pursuit")      # the pursuit's range is a model's
     if speed_law not in ("auto", "robust", "code"):
         raise ValueError("speed_law must be auto, robust or code, got %r" % speed_law)
@@ -622,7 +640,15 @@ def episode(seed=0, seconds=35.0, use_jev=True, video=None, hz=None, budget=None
     if avoid and not altitude:
         raise ValueError("avoid rides on the altitude stream: set altitude too")
     guide = Guidance(eye, search_lead_s, search_on_hold, speed_law=law, tune=guide_tune, reacq=rq, speed_scale=k,
-                     avoid_mode=avoid is not None)
+                     avoid_mode=avoid is not None, cmd_mode=policy == "laya-cmd")
+    cmds = cmd_now = None
+    prev_cmd = (0.0, 0.0)
+    if policy is not None:
+        if policy != "laya-cmd":
+            raise ValueError("policy must be None or laya-cmd, got %r" % (policy,))
+        import command as cmdmod
+        cmds = cmdmod.CommandStream(cmdmod.LayaCommand(cmd_model or pursuit_model or laya_model), hz=cmd_hz,
+                                    gpu=gpu)
     if emergency_m is not None:
         guide.emergency_m = float(emergency_m)
     loc = None
@@ -752,6 +778,15 @@ def episode(seed=0, seconds=35.0, use_jev=True, video=None, hz=None, budget=None
                     reacq.offer(eye.last_rgb, t, yaw, seen.context(yaw, src))
                     if reacq.lockstep and realtime:
                         wall0 += time.time() - t_off
+            if cmds is not None:
+                import avoid as avmod
+                sp, rel = avmod.travel(d.qvel[:3], yaw)
+                t_off = time.time()
+                cmds.offer(eye.last_rgb, t, yaw, {"altitude_m": round(float(pos[2]), 2), "speed_mps": round(sp, 2),
+                                                  "travel_deg": round(rel, 0), "prev_speed": round(prev_cmd[0], 1),
+                                                  "prev_turn": round(prev_cmd[1], 0), "lidar": avmod.sensor(scene)})
+                if cmds.lockstep and realtime:
+                    wall0 += time.time() - t_off
             if altim is not None:
                 actx = {"altitude_m": round(float(pos[2]), 2)}
                 if seen is not None:
@@ -796,10 +831,15 @@ def episode(seed=0, seconds=35.0, use_jev=True, video=None, hz=None, budget=None
                 alt_now = altim.read(t)
                 if i % 500 == 0:
                     alt_track.append((round(t, 1), round(float(pos[0]), 1), round(float(pos[2]), 2), round(alt_now, 2)))
+            if cmds is not None:
+                cmd_now = cmds.read(t)
+                if cmd_now is not None:
+                    prev_cmd = (cmd_now["speed"], cmd_now["turn"])
             v_des, yaw_cmd, acted, reflex = guide(scene, judg, yaw, pos[2], use_jev, fresh, t, pos, fix,
                                                   d.qvel[:3].copy() if law is not None else None,
                                                   reappear=rp, alt_sp=alt_now,
-                                                  avoid_ans=altim.avoid if (avoid and altim is not None) else None)
+                                                  avoid_ans=altim.avoid if (avoid and altim is not None) else None,
+                                                  cmd=cmd_now)
             if TRACE >= 2 and i % 250 == 0:
                 sec = scene["sector_range_m"]
                 print("    t=%5.1f pos=(%5.1f,%5.1f,%4.1f) yaw=%4.0f mv=%-11s commit=%-11s reflex=%d v=(%4.1f,%4.1f,%4.1f)"
@@ -982,6 +1022,10 @@ def episode(seed=0, seconds=35.0, use_jev=True, video=None, hz=None, budget=None
         if model_range:
             out["pursuit_range_mae_m"] = st["range_mae_m"]
     out["timing"] = timing
+    if cmds is not None:
+        out.update(policy=policy, commander=cmds.stats(), cmd_steps_pct=round(100 * guide.n_cmd_steps / max(n / 10, 1), 1),
+                   emergency_reflex_steps=guide.n_emergency)
+        cmds.close()
     if avoid:
         out.update(avoid=avoid, emergency_reflex_steps=guide.n_emergency,
                    emergency_reflex_pct=round(100 * guide.n_emergency / max(n / 10, 1), 2),
