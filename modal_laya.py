@@ -647,6 +647,42 @@ def sim_speed_check(gls: str = "osmesa,egl", seconds: float = 30.0):
             print(gl, "FAILED", repr(e)[:400])
 
 
+@app.function(cpu=2, memory=4096, timeout=3 * 60 * 60)
+def teacher_fly(course: str, seed: int, seconds: float):
+    """The lookahead teacher (teacher.py) flies a course itself: the ceiling check. CPU only."""
+    _enter()
+    import teacher
+    return json.dumps(teacher.fly(course, seed, seconds))
+
+
+@app.local_entrypoint()
+def teacher_ceiling(courses: str = "mixed-x4,no-climb-x4,pockets-x4,tactics-x4,town-x4,city-x4",
+                    seeds: str = "0,1,2,3,4,5,6,7,8,9,10,11"):
+    """Fly the lookahead teacher on every (course, seed); write results/teacher/<timestamp>/episodes.jsonl."""
+    import re
+    lengths = {"tactics": 40.0, "town": 60.0, "city": 90.0}
+
+    def secs(k):
+        mt = re.match(r"^(.*)-x(\d+(?:\.\d+)?)$", k)
+        return lengths.get(mt.group(1), 35.0) if mt else {"tactics": 110.0, "town": 120.0, "city": 225.0}.get(k, 90.0)
+    jobs = [(k, int(s), secs(k)) for k in courses.split(",") for s in seeds.split(",")]
+    d = os.path.join(HERE, "results", "teacher", time.strftime("%Y%m%d-%H%M%S"))
+    os.makedirs(d, exist_ok=True)
+    calls = [teacher_fly.spawn(*j) for j in jobs]
+    for j, fc in zip(jobs, calls):
+        r = _get(fc)
+        if isinstance(r, Exception):
+            print("FAILED", j, repr(r)[:300], flush=True)
+            continue
+        with open(os.path.join(d, "episodes.jsonl"), "a") as f:
+            f.write(r + "\n")
+        r = json.loads(r)
+        print("%-12s seed=%-2d ok=%-5s vis=%5.1f%% hits=%d crashed=%s no_safe=%s%% wall=%ss"
+              % (r["course"], r["seed"], r["ok"], r["target_visible_pct"], r["collisions"], r["crashed_at_s"],
+                 r["no_safe_option_pct"], r["wall_s"]), flush=True)
+    print("wrote", d)
+
+
 @app.function(cpu=1, timeout=120, volumes={"/data": data_vol})
 def rover_set_ready(name: str):
     return os.path.exists("/data/vqa/%s/_READY" % name)
