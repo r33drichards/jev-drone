@@ -198,6 +198,11 @@ for _s, _t in (("tau", {"yaw_tau_s": 0.3}), ("rate", {"yaw_rate_dps": 120.0}),
         dict(CONFIGS["laya-full-v3.3-rt"][4], guide_tune=_t),)
 CONFIGS["laya-full-v3.3-wc-rate"] = CONFIGS["laya-full-v3.3-rt-rate"][:4] + (
     dict(CONFIGS["laya-full-v3.3-rt-rate"][4], timing="wallclock"),)
+# the same configuration under a checkpoint-neutral name (pass the checkpoint with --model)
+CONFIGS["laya-full-wc-rate"] = CONFIGS["laya-full-v3.3-wc-rate"]
+# a looser yaw-rate cap for the fast town (the rover's bearing can swing faster than 120 deg/s round a corner)
+CONFIGS["laya-full-wc-rate240"] = CONFIGS["laya-full-wc-rate"][:4] + (
+    dict(CONFIGS["laya-full-wc-rate"][4], guide_tune={"yaw_rate_dps": 240.0}),)
 
 
 def _config(name):
