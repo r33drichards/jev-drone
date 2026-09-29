@@ -203,6 +203,14 @@ class _LockedAgent:
 def shared_laya(model=None, device=None, revision=None):
     """laya.load_vlm(model, **LAYA_BUDGETS), loaded once per (model, device, revision) per process."""
     key = (model or LAYA_MODEL, device, revision)
+    import laya_server
+    if laya_server.active():             # timing="wallclock": the checkpoint lives in the server process
+        with _SHARED_LOCK:
+            a = _SHARED.get(("remote",) + key)
+            if a is None:
+                a = _SHARED[("remote",) + key] = laya_server.RemoteAgent(*key)
+            a.users += 1
+            return a
     with _SHARED_LOCK:
         a = _SHARED.get(key)
         if a is None:

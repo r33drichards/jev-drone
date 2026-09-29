@@ -23,7 +23,7 @@ LAYA_DIR = os.environ.get("LAYA_DIR", os.path.join(HERE, "..", "laya-vision"))
 
 image = (
     modal.Image.debian_slim(python_version="3.12")
-    .apt_install("git", "libosmesa6", "libgl1")
+    .apt_install("git", "libosmesa6", "libgl1", "libegl1", "libglvnd0")
     .pip_install("torch==2.14.0", "torchvision==0.29.0", "transformers==5.17.0", "safetensors",
                  "huggingface_hub", "num2words", "numpy", "pillow", "mujoco>=3.13", "imageio", "imageio-ffmpeg")
     .run_commands(
@@ -186,12 +186,18 @@ CONFIGS = {
 # answer landing at its measured GPU latency in sim time, queued on one GPU, and the world never slowed for it
 for _n in ("hybrid-v2pursuit-alt", "hybrid-v2pursuit-alt-desat", "laya-full-v3.3", "laya-alt"):
     CONFIGS[_n + "-rt"] = CONFIGS[_n][:4] + (dict(CONFIGS[_n][4], timing="virtual"),)
+# true wall-clock real time (run.episode timing="wallclock", laya_server): the -rt configs with Laya in its own
+# process and the sim paced to the wall clock
+for _n in ("laya-full-v3.3-rt", "laya-alt-rt"):
+    CONFIGS[_n.replace("-rt", "-wc")] = CONFIGS[_n][:4] + (dict(CONFIGS[_n][4], timing="wallclock"),)
 # heading smoothing against the airmode balloons (run.Guidance tune): a low-pass on the pursuit heading, a cap on
 # the yaw command's rate, and both
 for _s, _t in (("tau", {"yaw_tau_s": 0.3}), ("rate", {"yaw_rate_dps": 120.0}),
                ("smooth", {"yaw_tau_s": 0.3, "yaw_rate_dps": 120.0})):
     CONFIGS["laya-full-v3.3-rt-" + _s] = CONFIGS["laya-full-v3.3-rt"][:4] + (
         dict(CONFIGS["laya-full-v3.3-rt"][4], guide_tune=_t),)
+CONFIGS["laya-full-v3.3-wc-rate"] = CONFIGS["laya-full-v3.3-rt-rate"][:4] + (
+    dict(CONFIGS["laya-full-v3.3-rt-rate"][4], timing="wallclock"),)
 
 
 def _config(name):
@@ -233,9 +239,11 @@ def scenes_remote(model: str = "", variants=(("full budgets, no image", []),)):
     return text, rows
 
 
-@app.function(gpu=["L4", "A10G"], cpu=4, memory=16384, timeout=60 * 60, max_containers=GPU_MAX,
+@app.function(gpu=["L4", "A10G"], cpu=8, memory=16384, timeout=60 * 60, max_containers=GPU_MAX,
               volumes={"/cache/hf": hf_vol, "/ckpt": ckpt_vol.read_only()})
 def fly(config: str, seed: int, seconds: float, model: str = "", course: str = "classic", budget: int = 0):
+    if _config(config)[4].get("timing") == "wallclock":     # render on the GPU: the CPU is the sim's
+        os.environ["MUJOCO_GL"] = os.environ["PYOPENGL_PLATFORM"] = "egl"
     _enter()
     import run
     use_model, backend, img, lockstep, pk = _config(config)
@@ -541,6 +549,57 @@ ROVER_SET_TAC = ROVER_SET + "_tac"
 ROVER_SET_TOWN = ROVER_SET + "_town"
 ROVER_SET_ALT = ROVER_SET + "_alt"       # altitude.py's ascend / descend operator
 ROVER_SET_ONP = ROVER_SET + "_onpolicy"  # frames from the checkpoint's own real-time flights (DAgger)
+
+
+@app.function(gpu=["L4", "A10G"], cpu=4, memory=16384, timeout=30 * 60,
+              volumes={"/cache/hf": hf_vol, "/ckpt": ckpt_vol.read_only()})
+def sim_speed(gl: str = "osmesa", course: str = "mixed", seconds: float = 30.0, seed: int = 0):
+    """How fast the sim alone runs (code pursuit, oracle tactics, the camera rendered as a Laya flight
+    renders it) with MuJoCo on `gl` ("osmesa": software on the CPU; "egl": the GPU): sim s per wall s."""
+    os.environ["MUJOCO_GL"] = gl
+    os.environ["PYOPENGL_PLATFORM"] = gl
+    _enter()
+    import run
+    t0 = time.time()
+    r = run.episode(seed, seconds, use_jev=True, backend="const:oracle", course=course, realtime=False,
+                    record_rgb=True)
+    wall = time.time() - t0
+    return json.dumps({"gl": gl, "sim_s": seconds, "wall_s": round(wall, 2), "speed_x": round(seconds / wall, 2),
+                       "finished": r["finished_at_s"], "vis": r["target_visible_pct"]})
+
+
+@app.function(gpu=["L4", "A10G"], cpu=4, memory=16384, timeout=30 * 60,
+              volumes={"/cache/hf": hf_vol, "/ckpt": ckpt_vol.read_only()})
+def sim_profile(gl: str = "egl", seconds: float = 15.0):
+    """cProfile of the sim alone (as sim_speed): the top functions by own time and by cumulative time."""
+    os.environ["MUJOCO_GL"] = gl
+    os.environ["PYOPENGL_PLATFORM"] = gl
+    _enter()
+    import cProfile, pstats, io, run
+    pr = cProfile.Profile()
+    pr.enable()
+    run.episode(0, seconds, use_jev=True, backend="const:oracle", course="mixed", realtime=False, record_rgb=True)
+    pr.disable()
+    out = io.StringIO()
+    st = pstats.Stats(pr, stream=out)
+    st.sort_stats("tottime").print_stats(22)
+    st.sort_stats("cumulative").print_stats(28)
+    return out.getvalue()
+
+
+@app.local_entrypoint()
+def sim_profile_check(gl: str = "egl", seconds: float = 15.0):
+    print(sim_profile.remote(gl, seconds))
+
+
+@app.local_entrypoint()
+def sim_speed_check(gls: str = "osmesa,egl", seconds: float = 30.0):
+    for gl in gls.split(","):
+        try:
+            print(sim_speed.remote(gl, "mixed", seconds))
+            print(sim_speed.remote(gl, "mixed", 3 * seconds))
+        except Exception as e:
+            print(gl, "FAILED", repr(e)[:400])
 
 
 @app.function(cpu=1, timeout=120, volumes={"/data": data_vol})

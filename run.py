@@ -481,11 +481,21 @@ def episode(seed=0, seconds=35.0, use_jev=True, video=None, hz=None, budget=None
     queued behind the other questions' calls. The sim then runs as fast as it can (realtime off); what Laya
     answers, how often and how late is what this GPU gives in real time. (laya-v3 tactics are not timed.)
 
+    "wallclock": true real time. Every checkpoint runs in one separate server process (laya_server), which
+    owns the GPU and answers the questions one at a time; the sim runs paced to the wall clock and nothing
+    waits for Laya. Valid only while the sim holds 1x: the result reports max_behind_s and behind_pct
+    (share of steps more than 50 ms behind the wall clock); the sim alone runs ~4.5x real time.
+
     `appearance`: realism.py's real-world look (textures, sky, scanned clutter) for a courses.py course, as a
     spec ("real", "tex+sky+c20", ...) or dict; None (default) leaves the scene as it is. A course-name suffix
     does the same without this argument ("mixed@real"); when both are given this one replaces the suffix."""
-    if timing not in ("wall", "virtual"):
-        raise ValueError("timing must be wall or virtual, got %r" % (timing,))
+    if timing not in ("wall", "virtual", "wallclock"):
+        raise ValueError("timing must be wall, virtual or wallclock, got %r" % (timing,))
+    if timing == "wallclock":
+        import laya_server
+        laya_server.start()          # before any backend is built: tactics.shared_laya routes to it
+        laya_server.reset_stats()
+        realtime = True
     gpu = None
     if timing == "virtual":
         import laya_pursuit
@@ -616,7 +626,10 @@ def episode(seed=0, seconds=35.0, use_jev=True, video=None, hz=None, budget=None
     lost_steps = lost_search = lost_reflex = n_search_prev = 0
     n = int(seconds / dt)
 
+    if timing == "wallclock":
+        laya_server.reset_stats()    # the flight's calls only, not the checkpoint loads and warm-ups
     wall0 = time.time()
+    max_behind, n_behind = 0.0, 0
     for i in range(n):
         t = i * dt
         if realtime:
@@ -625,6 +638,9 @@ def episode(seed=0, seconds=35.0, use_jev=True, video=None, hz=None, budget=None
             lag = t - (time.time() - wall0)
             if lag > 0.0005:
                 time.sleep(lag)
+            elif lag < -0.05:        # the sim is behind the wall clock (the world slows for everyone)
+                n_behind += 1
+                max_behind = max(max_behind, -lag)
         drive(m, d, t)
 
         pos = d.qpos[:3].copy()
@@ -883,6 +899,10 @@ def episode(seed=0, seconds=35.0, use_jev=True, video=None, hz=None, budget=None
         if model_range:
             out["pursuit_range_mae_m"] = st["range_mae_m"]
     out["timing"] = timing
+    if realtime:
+        out.update(max_behind_s=round(max_behind, 3), behind_pct=round(100 * n_behind / max(n, 1), 2))
+    if timing == "wallclock":
+        out["laya_server"] = laya_server.stats(len(standoffs) * dt)
     if gpu is not None:
         out["gpu_clock"] = gpu.stats(len(standoffs) * dt)
     if altim is not None:
