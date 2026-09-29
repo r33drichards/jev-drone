@@ -290,18 +290,32 @@ in the spirit of AlphaZero (github.com/ericjang/autogo): search makes the target
 
 Ceiling check: the teacher flies every 4x course itself, 12 seeds each (CPU, ~30x real time).
 
-| 4x course | teacher | best hand-written controller, perfect perception |
-|---|---|---|
-| town-x4 | **12/12**, rover in view 100% (median), 0 collisions | 8/12 |
-| city-x4 | **12/12**, 99.7%, 0 collisions | 12/12 |
-| pockets-x4 | **11/12**, 79% | 1-3/12 |
-| tactics-x4 | **10/12**, 80% | 0/4 |
-| mixed-x4 | 5/12, 22% | 4/12 |
-| no-climb-x4 | 4/12, 18% | 2/4 |
+| 4x course | teacher, path score (`20260929-203446`) | teacher, straight-line score (`20260929-173046`) | best hand-written controller, perfect perception |
+|---|---|---|---|
+| town-x4 | **12/12** | 12/12, rover in view 100% (median) | 8/12 |
+| city-x4 | **12/12** | 12/12, 99.7% | 12/12 |
+| pockets-x4 | 10/12 | **11/12**, 79% | 1-3/12 |
+| tactics-x4 | **12/12** | 10/12, 80% | 0/4 |
+| mixed-x4 | **12/12**, 77% | 5/12, 22% | 4/12 |
+| no-climb-x4 | **12/12**, 80% | 4/12, 18% | 2/4 |
+| total | **70/72** | 54/72 | |
 
-Zero collisions and zero crashes in all 72 flights. The 4x rover is flyable; the hand-written pursuit and avoidance
-were the limit. The teacher's own failures (mixed, no-climb) lose the rover, not the aircraft: its 2 s lookahead
-and "rover in view" score cannot plan the detour round a pocket or past the decoy. A longer horizon or a score for
-staying close to where the rover is going is the next teacher improvement. Two design points mattered: holding a
-command for the whole horizon left no safe option in 16% of decisions (commit 0.5 s then brake instead), and a
-1.2 s horizon steered into fences it could no longer avoid (2 s: none).
+Zero collisions and zero crashes in all 144 flights. The 4x rover is flyable; the hand-written pursuit and avoidance
+were the limit.
+
+The first teacher (straight-line score) lost the rover on mixed and no-climb, not the aircraft: its 2 s lookahead
+could not see that the straight line to the rover ran through a pocket wall or past the decoy. The fix scores
+**path distance round walls**: a 0.5 m occupancy grid of the course (NavGrid, cells blocked where an 8-ray check
+at flight height finds a wall within 0.5 m), Dijkstra from where the rover will be 1 s after the lookahead ends,
+and each candidate's end point scored by its path distance to it. Walls stay passable at 8x cost, so a rover
+behind a wall (inside a pocket) still has a finite, well-ordered distance; with walls impassable the rover was
+often unreachable and mixed fell to 0/12. Mixed and no-climb went from 9/24 to 24/24. The two pockets failures
+(seeds 3, 8) lose sight of the rover mid-course (in view 30-33%) with no collision.
+
+Two earlier design points mattered: holding a command for the whole horizon left no safe option in 16% of
+decisions (commit 0.5 s then brake instead), and a 1.2 s horizon steered into fences it could no longer avoid
+(2 s: none).
+
+Next: the teacher records its decisions (frame, lidar, speed, and softmax of the 45 scores as soft targets over
+speed / slide / turn: `command.py`) into `drone_rover_teacher`, and Laya trains on them to fly the `cmd` policy
+itself, AlphaZero-style distillation.
