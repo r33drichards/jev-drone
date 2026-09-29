@@ -167,11 +167,12 @@ CONFIGS = {
     # oracle's only other answer is climb, which the altitude operator replaces)
     # v3.3 alone, every decision: its own pursuit (v3.2a's fitted read-out), reacquisition and altitude
     "laya-full-v3.3": (True, "const:hold_course", False, False, dict(_V32_PURSUIT, reacquire="laya", altitude="laya")),
-    # the same with the old airmode mixing (flight.Pilot.yaw_desat off): isolates the yaw-desaturation fix
-    "hybrid-v2pursuit-alt-nodesat": (True, "const:hold_course", False, False,
-                                     {"pursuit": "laya-pursuit", "pursuit_questions": "v2", "reacquire": "laya",
-                                      "altitude": "laya", "pursuit_model": "/ckpt/smolvlm/drone-rover-v2/last",
-                                      "yaw_desat": False}),
+    # the same with yaw-first desaturation in the mixer (flight.Pilot.yaw_desat, off by default since
+    # results/laya/20260929-015224: no balloons, but 24/48 against 39/48 without it)
+    "hybrid-v2pursuit-alt-desat": (True, "const:hold_course", False, False,
+                                   {"pursuit": "laya-pursuit", "pursuit_questions": "v2", "reacquire": "laya",
+                                    "altitude": "laya", "pursuit_model": "/ckpt/smolvlm/drone-rover-v2/last",
+                                    "yaw_desat": True}),
     "laya-alt": (True, "const:hold_course", False, False, {"pursuit": "code", "altitude": "laya"}),
     "hybrid-v2pursuit-alt": (True, "const:hold_course", False, False,
                              {"pursuit": "laya-pursuit", "pursuit_questions": "v2", "reacquire": "laya",
@@ -181,6 +182,10 @@ CONFIGS = {
                              {"pursuit": "sim-pursuit", "pursuit_noise_deg": 4.0, "pursuit_delay_s": 0.1,
                               "pursuit_range": {"range_noise_m": 0.45, "range_offset_m": -0.1}, "reacquire": "sim"}),
 }
+# latency-faithful timing (run.episode timing="virtual", laya_pursuit.GpuClock): the same flights, with every Laya
+# answer landing at its measured GPU latency in sim time, queued on one GPU, and the world never slowed for it
+for _n in ("hybrid-v2pursuit-alt", "hybrid-v2pursuit-alt-desat", "laya-full-v3.3", "laya-alt"):
+    CONFIGS[_n + "-rt"] = CONFIGS[_n][:4] + (dict(CONFIGS[_n][4], timing="virtual"),)
 
 
 def _config(name):

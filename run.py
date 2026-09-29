@@ -417,7 +417,8 @@ def episode(seed=0, seconds=35.0, use_jev=True, video=None, hz=None, budget=None
             speed_law="auto", speed_params=None, guide_tune=None, reacquire=None, reacquire_model=None,
             reacquire_hz=3.0, reacquire_params=None, reacquire_wrong_p=0.0, reacquire_delay_s=0.0,
             tactics_kw=None, appearance=None, altitude=None, altitude_model=None, altitude_hz=3.0,
-            altitude_wrong_p=0.0, altitude_wrong=1.0, altitude_sharpen=1.0, record_rgb=False, yaw_desat=True):
+            altitude_wrong_p=0.0, altitude_wrong=1.0, altitude_sharpen=1.0, record_rgb=False, yaw_desat=False,
+            timing="wall"):
     """`record`: a list to append a snapshot to every 0.2 s of sim time (pose, obstacles,
     judgment, and the camera frame the model saw), for rendering after the flight
     (flightgif.py). Cheap, so the flight stays real time.
@@ -460,9 +461,23 @@ def episode(seed=0, seconds=35.0, use_jev=True, video=None, hz=None, budget=None
     pursuit_model or laya_model, read with `altitude_sharpen`): altitude.Altimeter asks how far to move up or
     down at most `altitude_hz` times a second and flies the setpoint; a `climb` maneuver is then ignored.
 
+    `timing`: "wall" (default): Laya's workers run in threads beside a sim paced to the wall clock, so when the
+    box cannot keep real time the world slows and Laya gets extra time. "virtual": latency-faithful, every
+    Laya call (pursuit locator, reacquirer, altimeter) is timed on one laya_pursuit.GpuClock: the sim stands
+    still while the model computes, and each answer lands at sim time start + its measured GPU latency,
+    queued behind the other questions' calls. The sim then runs as fast as it can (realtime off); what Laya
+    answers, how often and how late is what this GPU gives in real time. (laya-v3 tactics are not timed.)
+
     `appearance`: realism.py's real-world look (textures, sky, scanned clutter) for a courses.py course, as a
     spec ("real", "tex+sky+c20", ...) or dict; None (default) leaves the scene as it is. A course-name suffix
     does the same without this argument ("mixed@real"); when both are given this one replaces the suffix."""
+    if timing not in ("wall", "virtual"):
+        raise ValueError("timing must be wall or virtual, got %r" % (timing,))
+    gpu = None
+    if timing == "virtual":
+        import laya_pursuit
+        gpu = laya_pursuit.GpuClock()
+        realtime = False             # nothing waits on the wall clock any more
     rng = np.random.default_rng(seed)
     lap_course = None                # a looped course (town.py): laps, not an end line
     if course == "classic":
@@ -517,7 +532,8 @@ def episode(seed=0, seconds=35.0, use_jev=True, video=None, hz=None, budget=None
             laya_pursuit.make_locator_backend(pursuit, pursuit_model, pursuit_threshold, pursuit_noise_deg,
                                               pursuit_delay_s, seed, questions=pursuit_questions,
                                               sharpen=pursuit_sharpen, gain=pursuit_gain, **(pursuit_range or {})),
-            truth=lambda: laya_pursuit.true_fix(m, d, scene), lockstep=pursuit_lockstep)
+            truth=lambda: laya_pursuit.true_fix(m, d, scene), lockstep=pursuit_lockstep,
+            gpu=gpu if pursuit.startswith("laya") else None)
     tac = None
     if use_jev:
         from tactics import Tactician, DEFAULT, make_backend
@@ -546,7 +562,8 @@ def episode(seed=0, seconds=35.0, use_jev=True, video=None, hz=None, budget=None
             laya_pursuit.make_reappear_backend(reacquire, reacquire_model or pursuit_model or laya_model,
                                                reacquire_wrong_p, reacquire_delay_s, seed),
             hz=reacquire_hz,
-            truth=lambda: laya_pursuit.reappear_truth(m, d, rover_at, t, bool(scene["target"]["visible"])))
+            truth=lambda: laya_pursuit.reappear_truth(m, d, rover_at, t, bool(scene["target"]["visible"])),
+            gpu=gpu if reacquire == "laya" else None)
     reacq_after = guide.reacq["after_s"] if reacquire else None
     altim = alt_now = None
     if altitude is not None:
@@ -558,7 +575,8 @@ def episode(seed=0, seconds=35.0, use_jev=True, video=None, hz=None, budget=None
             altmod.make_backend(altitude, target_fn=lambda: target_fn(d.qpos[:3]),
                                 model=altitude_model or pursuit_model or laya_model, wrong_p=altitude_wrong_p,
                                 wrong=altitude_wrong, sharpen=altitude_sharpen, seed=seed),
-            hz=altitude_hz, truth=lambda: target_fn(d.qpos[:3]), start=CRUISE_ALT)
+            hz=altitude_hz, truth=lambda: target_fn(d.qpos[:3]), start=CRUISE_ALT,
+            gpu=gpu if altitude == "laya" else None)
         alt_track = []
 
     writer = cam = big = None
@@ -619,7 +637,7 @@ def episode(seed=0, seconds=35.0, use_jev=True, video=None, hz=None, budget=None
             if loc:
                 t_off = time.time()
                 loc.offer(eye.last_rgb, t, yaw, scene["target"]["bearing_deg"])
-                if pursuit_lockstep and realtime:
+                if loc.lockstep and realtime:
                     wall0 += time.time() - t_off
             if reacq is not None:
                 src = fix if loc else scene["target"]
@@ -851,6 +869,9 @@ def episode(seed=0, seconds=35.0, use_jev=True, video=None, hz=None, budget=None
                    pursuit_p90_latency_s=st["p90_latency_s"], locator=st)
         if model_range:
             out["pursuit_range_mae_m"] = st["range_mae_m"]
+    out["timing"] = timing
+    if gpu is not None:
+        out["gpu_clock"] = gpu.stats(len(standoffs) * dt)
     if altim is not None:
         out.update(altitude=altitude, altimeter=altim.stats(), altitude_track=alt_track)
         altim.close()

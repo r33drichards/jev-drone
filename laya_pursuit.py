@@ -346,6 +346,48 @@ class RangeSpeed:
         return float(np.clip(fwd, lo, hi))
 
 
+class GpuClock:
+    """Latency-faithful timing for every Laya call in a flight (run.episode timing="virtual"). The sim stands
+    still while the model computes (the workers run lockstep, and that pause is not sim time), each call's
+    wall-clock latency L is measured, and its answer is released at sim time start + L, where start is the
+    later of the frame's time and the moment the GPU is free: one GPU, calls from every question queued on it
+    in order. So the world never waits for Laya and Laya never gets extra time: what it can answer, and how
+    late, is what this GPU would give in real time, however slowly the sim itself runs.
+
+    run(t, fn) -> (result, release sim time)."""
+
+    def __init__(self):
+        self.free_at = float("-inf")
+        self.busy_s = self.wait_s = 0.0
+        self.calls = 0
+        self._lock = threading.Lock()
+        self.by_stream = {}
+
+    def run(self, t, fn, stream="?"):
+        t0 = time.time()
+        res = fn()
+        lat = time.time() - t0
+        with self._lock:
+            start = max(t, self.free_at)
+            end = start + lat
+            self.free_at = end
+            self.busy_s += lat
+            self.wait_s += start - t
+            self.calls += 1
+            st = self.by_stream.setdefault(stream, [0, 0.0, 0.0])
+            st[0] += 1
+            st[1] += lat
+            st[2] += end - t
+        return res, end
+
+    def stats(self, flew_s):
+        return {"calls": self.calls, "gpu_busy_pct": round(100 * self.busy_s / max(flew_s, 1e-9), 1),
+                "mean_queue_wait_s": round(self.wait_s / max(self.calls, 1), 3),
+                "by_stream": {k: {"calls": n, "per_s": round(n / max(flew_s, 1e-9), 2),
+                                  "mean_compute_s": round(c / max(n, 1), 3), "mean_answer_age_s": round(a / max(n, 1), 3)}
+                              for k, (n, c, a) in self.by_stream.items()}}
+
+
 class Locator:
     """Where is the rover? Asked every camera frame, answered when the backend is free.
 
@@ -357,11 +399,12 @@ class Locator:
     estimate is scored against it (taken at the frame's time), so a flight reports its own
     perception error."""
 
-    def __init__(self, backend, truth=None, lockstep=False, fresh_s=FRESH_S):
+    def __init__(self, backend, truth=None, lockstep=False, fresh_s=FRESH_S, gpu=None):
         self.backend = backend
         self.model = backend.model
         self.truth = truth
-        self.lockstep = lockstep or getattr(backend, "instant", False)
+        self.gpu = gpu                      # GpuClock: latency-faithful virtual time (lockstep, released at start + L)
+        self.lockstep = lockstep or getattr(backend, "instant", False) or gpu is not None
         self.fresh_s = fresh_s
         self.delay_s = getattr(backend, "delay_s", 0.0)
         self._busy_until = float("-inf")    # sim time; only a delayed (sim) backend uses it
@@ -439,7 +482,11 @@ class Locator:
                 continue
             t0 = time.time()
             try:
-                res = self.backend.locate(frame, truth)
+                if self.gpu is not None:
+                    res, ready = self.gpu.run(t, lambda: self.backend.locate(frame, truth), "steer")
+                    self._busy_until = ready        # this stream's next frame waits for its answer
+                else:
+                    res, ready = self.backend.locate(frame, truth), t + self.delay_s
                 vis, b, p = res[:3]
                 rng = res[3] if len(res) > 3 else None     # backends without a range estimate return 3
                 self.latency.append(time.time() - t0)
@@ -452,7 +499,7 @@ class Locator:
                         if rng is not None:
                             self.range_err.append(abs(rng - truth[2]))
                 with self._lock:
-                    self._pending.append((t + self.delay_s,
+                    self._pending.append((ready,
                                           {"visible": vis, "bearing_deg": b, "range_m": rng, "p_visible": p,
                                            "t": t, "yaw": yaw}))
             except Exception as ex:                  # degrade to "not seen", never crash the flight
@@ -626,12 +673,14 @@ class Reacquirer:
     side is relative to that nose), or None. `truth()` -> reappear_truth tuple: the sim answers from it, and
     every answer is scored against it."""
 
-    def __init__(self, backend, hz=3.0, truth=None):
+    def __init__(self, backend, hz=3.0, truth=None, gpu=None):
         self.backend = backend
         self.model = backend.model
         self.min_dt = 1.0 / float(hz)
         self.truth = truth
-        self.lockstep = getattr(backend, "instant", False)
+        self.gpu = gpu                      # GpuClock (see Locator)
+        self._busy_until = float("-inf")
+        self.lockstep = getattr(backend, "instant", False) or gpu is not None
         self.delay_s = getattr(backend, "delay_s", 0.0)
         self._last_sent = float("-inf")
         self._q = queue.Queue(maxsize=1)
@@ -649,7 +698,7 @@ class Reacquirer:
 
     def offer(self, frame, now, yaw, context):
         self.n_offer += 1
-        if now - self._last_sent < self.min_dt:
+        if now - self._last_sent < self.min_dt or now < self._busy_until:
             self.n_rate += 1
             return
         self._last_sent = now
@@ -681,14 +730,18 @@ class Reacquirer:
                 continue
             t0 = time.time()
             try:
-                a = self.backend.answer(frame, ctx, truth)
+                if self.gpu is not None:
+                    a, ready = self.gpu.run(t, lambda: self.backend.answer(frame, ctx, truth), "reacquire")
+                    self._busy_until = ready
+                else:
+                    a, ready = self.backend.answer(frame, ctx, truth), t + self.delay_s
                 self.latency.append(time.time() - t0)
                 self.n_answers += 1
                 self.sides[a["side"]] = self.sides.get(a["side"], 0) + 1
                 if truth is not None:
                     self.correct.append(a["side"] == truth[0])
                 with self._lock:
-                    self._pending.append((t + self.delay_s, dict(a, t=t, yaw=yaw, context=ctx,
+                    self._pending.append((ready, dict(a, t=t, yaw=yaw, context=ctx,
                                                                  true_side=None if truth is None else truth[0])))
             except Exception as ex:                  # degrade to "no answer", never crash the flight
                 self.errors += 1

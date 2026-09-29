@@ -146,12 +146,14 @@ class Altimeter:
     after every answer that has arrived by then (each moved by next_setpoint from the altitude its frame was
     taken at). `truth()` -> the course's target altitude, to score the answers."""
 
-    def __init__(self, backend, hz=3.0, truth=None, start=CRUISE):
+    def __init__(self, backend, hz=3.0, truth=None, start=CRUISE, gpu=None):
         self.backend = backend
         self.model = backend.model
         self.min_dt = 1.0 / float(hz)
         self.truth = truth
-        self.lockstep = getattr(backend, "instant", False)
+        self.gpu = gpu                      # laya_pursuit.GpuClock: latency-faithful virtual time
+        self._busy_until = float("-inf")
+        self.lockstep = getattr(backend, "instant", False) or gpu is not None
         self.sp = float(start)
         self._last_sent = float("-inf")
         self._q = queue.Queue(maxsize=1)
@@ -167,7 +169,7 @@ class Altimeter:
 
     def offer(self, frame, now, context):
         self.n_offer += 1
-        if now - self._last_sent < self.min_dt:
+        if now - self._last_sent < self.min_dt or now < self._busy_until:
             self.n_rate += 1
             return
         self._last_sent = now
@@ -200,14 +202,18 @@ class Altimeter:
                 continue
             t0 = time.time()
             try:
-                a = self.backend.answer(frame, ctx)
+                if self.gpu is not None:
+                    a, ready = self.gpu.run(t, lambda: self.backend.answer(frame, ctx), "altitude")
+                    self._busy_until = ready
+                else:
+                    a, ready = self.backend.answer(frame, ctx), t + self.backend.delay_s
                 self.latency.append(time.time() - t0)
                 self.n_answers += 1
                 self.dzs.append(a["dz"])
                 if truth is not None:
                     self.abs_err.append(abs(a["dz"] - label(truth, ctx["altitude_m"])))
                 with self._lock:
-                    self._pending.append((t + self.backend.delay_s, ctx["altitude_m"], a["dz"]))
+                    self._pending.append((ready, ctx["altitude_m"], a["dz"]))
             except Exception as e:           # a failed call leaves the setpoint where it was
                 self.errors += 1
                 self.last_error = repr(e)[:200]

@@ -32,7 +32,10 @@ class Pilot:
         self.max_acc = 7.5            # slew the velocity command; step changes tumble it
         self.lat_acc = 35.0           # lateral slew (reversals are the tumble risk)
         self.airmode = True           # torque-priority mixing; see _mix below
-        self.yaw_desat = True         # ...with yaw scaled down first, so a yaw demand never adds lift
+        # yaw scaled down first, so a yaw demand never adds lift. Off: it stopped the ballooning (max 3.2 m vs 23 m)
+        # but starved the heading of authority, and Laya-steered flights lost the rover (hybrid 24/48 vs 39/48,
+        # results/laya/20260929-015224)
+        self.yaw_desat = False
         self.b3_rate = np.deg2rad(10000.0) # attitude-target slewing destabilises it
         self.recovering = False
         self.b3_prev = None
