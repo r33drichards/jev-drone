@@ -248,3 +248,33 @@ when high: 92%.
   and lost the rover there. Code pursuit with the oracle finishes these seeds. The only visible difference is a
   ±0.07 m setpoint jitter, from re-anchoring each near-zero answer to the measured altitude. A deadband
   (keep the setpoint when |dz| < 0.2 m) would remove it; not yet tried.
+
+## Real-time evaluation: latency-faithful timing (`results/laya/20260929-022552` + town)
+
+Until now the sim was paced to the wall clock with Laya's workers in threads beside it. When the box could not
+keep up (rt 0.6-0.9 on recent runs), the world slowed down and Laya got extra time, and Laya's calls also
+competed with the physics and rendering for the CPU (0.1-0.25 s per call). `run.episode(timing="virtual")`
+fixes both: the sim stands still while Laya computes, and each answer lands at sim time start + its measured
+GPU latency. Every question's calls queue on one GPU (laya_pursuit.GpuClock). What Laya can answer, how often
+and how late is what this GPU gives in real time; the sim's own speed no longer matters. yaw_desat is off.
+
+Measured (v3.3 full control): 0.064 s per call, GPU 91% busy, steering 10.9 answers/s arriving 0.08 s after
+their frame, altitude 2.5/s, reacquisition 2.5/s while lost.
+
+| config (-rt = virtual timing) | steering | reacquire | altitude | mixed | no-climb | total | town |
+|---|---|---|---|---|---|---|---|
+| code pursuit, oracle climbs (bar) | code | – | oracle | – | – | 45/48 | 6/6 |
+| **laya-alt-rt** | code | – | v3.3 | 24 | 23 | **47/48** | – |
+| **laya-full-v3.3-rt** | v3.3 | v3.3 | v3.3 | 22 | 22 | **44/48** | **6/6** |
+| hybrid-v2pursuit-alt-rt | v2 | v3.3 | v3.3 | 15 | 21 | 36/48 | 3/6 |
+
+- **A single checkpoint in full control matches the code** on the corridors (44 vs 45/48) and in the town
+  (6/6, rover in view 99.9%, no reflex, no collisions). Laya flying altitude on code steering beats the code
+  with oracle climbs (47/48).
+- **The earlier wall-clock numbers understated Laya.** Contention made its answers 2-3x slower than the GPU
+  allows; with that removed (and yaw_desat off), laya-full-v3.3 went from 24/48 to 44/48.
+- **Ballooning remains** (airmode lift under hard yaw): 31 of 48 v3.3 flights went above 4 m (median peak
+  6.4 m, max 13.7 m). Most still finish. A heading low-pass or yaw-rate cap, rather than the mixer change, is
+  the next thing to try.
+- v2 steering is now clearly worse than v3.3 (36/48, town 3/6): it answers 7.6 times a second against 10.9,
+  since two checkpoints share the GPU, and it was never trained on the town or the latest data.
