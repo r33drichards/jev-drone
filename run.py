@@ -28,6 +28,8 @@ ROVER_SPEED = 1.15
 SEARCH_SPEED = 2.4
 FWD_CAP_FAST = 7.0       # forward-speed cap when speed_scale > 1
 BRAKE_ACC, BRAKE_MARGIN_M = 4.0, 1.5    # speed_scale > 1: v <= sqrt(2 a (path_ahead - margin))
+TRAIL_LOOKAHEAD_M = 3.0   # tune aim="trail": steer at the rover's trail this far ahead
+EMERGENCY_REFLEX_M = 1.0  # avoid="laya": the code's last-resort reflex distance (avoid.EMERGENCY_M)
 TARGET_MAX_SPEED = 1.6   # the rover cannot move faster than this; clamp the estimate       # while searching, still out-pace the rover
 
 
@@ -86,8 +88,14 @@ class Guidance:
     """
 
     def __init__(self, eye, search_lead_s=5.0, search_on_hold=False, speed_law=None, tune=None, reacq=None,
-                 speed_scale=1.0):
+                 speed_scale=1.0, avoid_mode=False):
         self.eye = eye
+        # avoid_mode: Laya's avoid answer (avoid.py) flies collision avoidance; the code's reactive slide and
+        # braking limit are off and the reflex only fires under avoid.EMERGENCY_M
+        self.avoid_mode = bool(avoid_mode)
+        self.n_emergency = 0
+        self.avoid_steps = {}
+        self.trail = []                  # tune["aim"] == "trail": (t, world xy) of the rover's fixes, 6 s
         # a faster rover (town-x<k>): cruise / search speeds and the rover-speed clamp scale with it, the
         # forward cap with it up to FWD_CAP_FAST (the airframe's 28 deg tilt limit)
         k = float(speed_scale)
@@ -252,7 +260,7 @@ class Guidance:
         return self.eye.sector_bearing(best)
 
     def __call__(self, scene, judg, yaw, z, use_jev, fresh=False, t=0.0, pos=None, fix=None, vel=None,
-                 reappear=None, alt_sp=None):
+                 reappear=None, alt_sp=None, avoid_ans=None):
         """`fix`: the target as another perception sees it (laya_pursuit.Locator), in the shape of
         scene["target"]; it replaces the camera's for pursuit only. Its range_m is the code's, and
         None when only the model sees the rover: then hold the not-visible speed -- except with a
@@ -279,6 +287,9 @@ class Guidance:
                 # a 0.07s interval turns pixel noise into tens of m/s.
                 self.tgt_hist.append((t, w))
                 self.tgt_hist = [(ti, wi) for ti, wi in self.tgt_hist if t - ti <= 1.2]
+                if self.tune.get("aim") == "trail":
+                    self.trail.append((t, np.array(w, dtype=float)))
+                    self.trail = [(ti, wi) for ti, wi in self.trail if t - ti <= 6.0]
                 if len(self.tgt_hist) >= 2:
                     (t0, w0), (t1, w1) = self.tgt_hist[0], self.tgt_hist[-1]
                     if t1 - t0 >= 0.4:
@@ -303,6 +314,19 @@ class Guidance:
         if self.speed_law is not None:
             fwd = self.speed_law(t, bool(tgt["visible"]), tgt["range_m"], tgt.get("t_est"), tgt["bearing_deg"],
                                  yaw, vel)
+        if self.tune.get("aim") == "trail" and tgt["visible"] and pos is not None and self.trail:
+            # follow the rover's own trail instead of flying straight at it (which cuts corners into houses):
+            # drop the crumbs we have reached, then steer at the oldest one still TRAIL_LOOKAHEAD_M away
+            self.trail = [(ti, wi) for ti, wi in self.trail if np.linalg.norm(wi - pos[:2]) > 1.5]
+            for ti, wi in self.trail:
+                dv = wi - pos[:2]
+                if np.linalg.norm(dv) >= TRAIL_LOOKAHEAD_M:
+                    b = float((np.arctan2(dv[1], dv[0]) - yaw + np.pi) % (2 * np.pi) - np.pi)
+                    yaw_rel = float(np.clip(b, -0.6, 0.6))
+                    break
+        if self.k > 1 and tgt["visible"]:
+            # slow for sharp turns at speed: full speed within 20 deg of the nose, half at 70 deg and beyond
+            fwd *= float(np.clip(1.0 - (abs(self.last_bearing) - 0.35) / 1.75, 0.5, 1.0))
 
         # altitude: the Altimeter's setpoint when one flies it (altitude.py; `climb` is then ignored), else
         # cruise, or CLIMB_ALT for the climb hold
@@ -315,7 +339,7 @@ class Guidance:
         right_room = min(sec["far_right"], sec["right"])
         wr = min(sec.values())
         turn_bias, slide = 0.0, 0.0
-        if wr < 4.0:
+        if wr < 4.0 and not self.avoid_mode:
             urgency = (4.0 - wr) / 4.0
             side = 1.0 if left_room > right_room else -1.0
             room = max(left_room, right_room)
@@ -398,13 +422,24 @@ class Guidance:
 
         # --- braking limit for a faster rover (speed_scale > 1): never faster than we can stop from in the
         # clear path ahead (BRAKE_ACC, BRAKE_MARGIN_M); off at normal speed, where the reflex below suffices
-        if self.k > 1:
+        if self.k > 1 and not self.avoid_mode:
             fwd = min(fwd, max(0.25, float(np.sqrt(2 * BRAKE_ACC * max(0.0, scene["path_ahead_m"] - BRAKE_MARGIN_M)))))
+        if self.avoid_mode and avoid_ans is not None and t - avoid_ans[1] < 0.6:
+            # Laya's collision-avoidance answer (avoid.py), from its frame + depth sensor + speed
+            av = avoid_ans[0]
+            self.avoid_steps[av] = self.avoid_steps.get(av, 0) + 1
+            if av in ("dodge_left", "dodge_right"):
+                slide = (1.0 if av == "dodge_left" else -1.0) * 2.2
+                fwd = min(fwd, max(1.0, 0.5 * fwd))
+            elif av == "brake":
+                fwd = min(fwd, 0.3)
 
         # --- hard reflex: code overrides everything, Jev included ------------------
         # Reflex on what is in the path, not on what is merely alongside.
         near, nb = scene["path_ahead_m"], np.deg2rad(scene["nearest_bearing_deg"])
-        reflex = near < REFLEX_M
+        reflex = near < (EMERGENCY_REFLEX_M if self.avoid_mode else REFLEX_M)
+        if reflex and self.avoid_mode:
+            self.n_emergency += 1
         if reflex:
             side = 1.0 if left_room > right_room else -1.0
             slide = side * 2.6 * min(1.0, max(left_room, right_room) / 3.0)
@@ -446,7 +481,7 @@ def episode(seed=0, seconds=35.0, use_jev=True, video=None, hz=None, budget=None
             reacquire_hz=3.0, reacquire_params=None, reacquire_wrong_p=0.0, reacquire_delay_s=0.0,
             tactics_kw=None, appearance=None, altitude=None, altitude_model=None, altitude_hz=3.0,
             altitude_wrong_p=0.0, altitude_wrong=1.0, altitude_sharpen=1.0, record_rgb=False, yaw_desat=False,
-            timing="wall", record_every=100, speed_scale=None):
+            timing="wall", record_every=100, speed_scale=None, avoid=None, avoid_hz=6.0):
     """`record`: a list to append a snapshot to every 0.2 s of sim time (pose, obstacles,
     judgment, and the camera frame the model saw), for rendering after the flight
     (flightgif.py). Cheap, so the flight stays real time.
@@ -501,8 +536,13 @@ def episode(seed=0, seconds=35.0, use_jev=True, video=None, hz=None, budget=None
     waits for Laya. Valid only while the sim holds 1x: the result reports max_behind_s and behind_pct
     (share of steps more than 50 ms behind the wall clock); the sim alone runs ~4.5x real time.
 
+    `avoid`: None (default: the code avoids collisions from the depth sensor), "laya" (the altitude checkpoint
+    also answers avoid.question() from its frame + the depth sensor summary + forward speed, in the same
+    predict, at `avoid_hz`, and Guidance flies that answer; the code keeps only an emergency reflex under
+    EMERGENCY_REFLEX_M) or "sim" (the same with the answer from the true geometry, avoid.label). Needs altitude.
+
     `speed_scale`: scale the pursuit's speeds for a rover k times faster (default: the course's own factor,
-    e.g. 4 on town-x4; Guidance speed_scale, and RangeSpeed cruise / caps / rover speed).
+    e.g. 4 on any "<course>-x4"; Guidance speed_scale, and RangeSpeed cruise / caps / rover speed).
 
     `appearance`: realism.py's real-world look (textures, sky, scanned clutter) for a courses.py course, as a
     spec ("real", "tex+sky+c20", ...) or dict; None (default) leaves the scene as it is. A course-name suffix
@@ -563,8 +603,9 @@ def episode(seed=0, seconds=35.0, use_jev=True, video=None, hz=None, budget=None
         raise ValueError("speed_law must be auto, robust or code, got %r" % speed_law)
     if speed_scale is None:
         speed_scale = 1.0
-        if course.startswith("town-x"):
-            speed_scale = float(course[len("town-x"):].split("@")[0])
+        if course != "classic":
+            import courses
+            speed_scale = courses.split_speed(course)[1]
     k = float(speed_scale)
     law = None
     if model_range and speed_law in ("auto", "robust"):
@@ -577,7 +618,12 @@ def episode(seed=0, seconds=35.0, use_jev=True, video=None, hz=None, budget=None
     rq = None if reacquire is None else dict(reacquire_params or {})
     if rq is not None and k > 1:
         rq.setdefault("cap", min(REACQ_DEFAULTS["cap"] * k, FWD_CAP_FAST - 0.5))
-    guide = Guidance(eye, search_lead_s, search_on_hold, speed_law=law, tune=guide_tune, reacq=rq, speed_scale=k)
+    if avoid not in (None, "laya", "sim"):
+        raise ValueError("avoid must be None, laya or sim, got %r" % (avoid,))
+    if avoid and not altitude:
+        raise ValueError("avoid rides on the altitude stream: set altitude too")
+    guide = Guidance(eye, search_lead_s, search_on_hold, speed_law=law, tune=guide_tune, reacq=rq, speed_scale=k,
+                     avoid_mode=avoid is not None)
     loc = None
     if pursuit != "code":
         import laya_pursuit
@@ -627,8 +673,8 @@ def episode(seed=0, seconds=35.0, use_jev=True, video=None, hz=None, budget=None
         altim = altmod.Altimeter(
             altmod.make_backend(altitude, target_fn=lambda: target_fn(d.qpos[:3]),
                                 model=altitude_model or pursuit_model or laya_model, wrong_p=altitude_wrong_p,
-                                wrong=altitude_wrong, sharpen=altitude_sharpen, seed=seed),
-            hz=altitude_hz, truth=lambda: target_fn(d.qpos[:3]), start=CRUISE_ALT,
+                                wrong=altitude_wrong, sharpen=altitude_sharpen, seed=seed, avoid=avoid is not None),
+            hz=avoid_hz if avoid else altitude_hz, truth=lambda: target_fn(d.qpos[:3]), start=CRUISE_ALT,
             gpu=gpu if altitude == "laya" else None)
         alt_track = []
 
@@ -709,6 +755,10 @@ def episode(seed=0, seconds=35.0, use_jev=True, video=None, hz=None, budget=None
                 actx = {"altitude_m": round(float(pos[2]), 2)}
                 if seen is not None:
                     actx.update(seen.context(yaw, fix if loc else scene["target"]))
+                if avoid:
+                    import avoid as avmod
+                    actx["speed_mps"] = round(avmod.forward_speed(d.qvel[:3], yaw), 2)
+                    actx["sensor"] = avmod.sensor(scene)
                 t_off = time.time()
                 altim.offer(eye.last_rgb, t, actx)
                 if altim.lockstep and realtime:
@@ -746,7 +796,8 @@ def episode(seed=0, seconds=35.0, use_jev=True, video=None, hz=None, budget=None
                     alt_track.append((round(t, 1), round(float(pos[0]), 1), round(float(pos[2]), 2), round(alt_now, 2)))
             v_des, yaw_cmd, acted, reflex = guide(scene, judg, yaw, pos[2], use_jev, fresh, t, pos, fix,
                                                   d.qvel[:3].copy() if law is not None else None,
-                                                  reappear=rp, alt_sp=alt_now)
+                                                  reappear=rp, alt_sp=alt_now,
+                                                  avoid_ans=altim.avoid if (avoid and altim is not None) else None)
             if TRACE >= 2 and i % 250 == 0:
                 sec = scene["sector_range_m"]
                 print("    t=%5.1f pos=(%5.1f,%5.1f,%4.1f) yaw=%4.0f mv=%-11s commit=%-11s reflex=%d v=(%4.1f,%4.1f,%4.1f)"
@@ -929,6 +980,10 @@ def episode(seed=0, seconds=35.0, use_jev=True, video=None, hz=None, budget=None
         if model_range:
             out["pursuit_range_mae_m"] = st["range_mae_m"]
     out["timing"] = timing
+    if avoid:
+        out.update(avoid=avoid, emergency_reflex_steps=guide.n_emergency,
+                   emergency_reflex_pct=round(100 * guide.n_emergency / max(n / 10, 1), 2),
+                   avoid_steps=dict(guide.avoid_steps))
     if realtime:
         out.update(max_behind_s=round(max_behind, 3), behind_pct=round(100 * n_behind / max(n, 1), 2))
     if timing == "wallclock":

@@ -1186,12 +1186,22 @@ def _spearman(a, b):
 ONPOLICY_LOST_S, ONPOLICY_SEEN_S = 0.25, 0.6
 
 
+def flight_seconds(course):
+    """A flight's length: the course's own, or about 1/k of it for a k-times faster rover ("-x<k>")."""
+    import courses
+    base, k = courses.split_speed(course)
+    s = V3_SECONDS.get(base.split("@")[0], 90.0)
+    if base.startswith("city"):
+        s = 225.0
+    return s if k == 1.0 else {"tactics": 40.0, "town": 60.0, "city": 90.0}.get(base, 35.0)
+
+
 def collect_flight_onpolicy(course, seed, model, flight_kw, seconds=None):
     """-> (frames, the episode result). `flight_kw`: run.episode arguments of the flying configuration
     (modal_laya CONFIGS pursuit kwargs); `model`: its checkpoint (laya_model / pursuit_model default)."""
-    import run, flight, courses, altitude, laya_pursuit
+    import run, flight, courses, altitude, laya_pursuit, avoid
     from PIL import Image
-    seconds = seconds or V3_SECONDS.get(course, 90.0)
+    seconds = seconds or flight_seconds(course)
     c = courses.make(course, seed)
     frames, sightings = [], []
     st = {"last": -1e9}
@@ -1211,12 +1221,16 @@ def collect_flight_onpolicy(course, seed, model, flight_kw, seconds=None):
         side, b3, occl = laya_pursuit.reappear_truth(self.m, data, c.rover_pose, t, vis)
         z = float(pos[2])
         target = float(c.altitude_target(pos))
+        sens = avoid.sensor(sc)
+        v = avoid.forward_speed(data.qvel[:3], yaw)
         ctx = {"altitude_m": round(z, 2), "unseen_for_s": 0.0 if vis else tg["unseen_for_s"],
                "last_seen_bearing_deg": None if seen is None else round(_wrap_deg(seen[1] - np.rad2deg(yaw - seen[3])), 1),
-               "last_seen_range_m": None if seen is None else round(seen[2], 2)}
+               "last_seen_range_m": None if seen is None else round(seen[2], 2),
+               "speed_mps": round(v, 2), "sensor": sens}
         buf = io.BytesIO()
         Image.fromarray(self.last_rgb).save(buf, "JPEG", quality=90)
         frames.append({"course": course, "seed": seed, "t": round(t, 2), "jpeg": buf.getvalue(), "context": ctx,
+                       "avoid": avoid.label(sens, v),
                        "visible": vis, "pixels": int(tg["pixels"]),
                        "bearing_deg": float(tg["bearing_deg"]) if vis else 0.0,
                        "range_m": float(tg["range_m"]) if vis else 0.0,
@@ -1228,7 +1242,8 @@ def collect_flight_onpolicy(course, seed, model, flight_kw, seconds=None):
     flight.Eye.look = look
     try:
         r = run.episode(seed, seconds, use_jev=True, backend="const:hold_course", course=course,
-                        laya_model=model, pursuit_model=model, timing="virtual", **flight_kw)
+                        laya_model=model or None, pursuit_model=model or None, timing="virtual", record_rgb=True,
+                        **flight_kw)
     finally:
         flight.Eye.look = orig_look
     return frames, r
@@ -1238,9 +1253,10 @@ def records_onpolicy(frames, image_dir, rel_prefix="images", visible_every=3):
     """v2 visible / where / steer7 / range8 (soft targets) on every visible frame and 1 in `visible_every`
     of them for visible; occluded / reappear on every lost frame and on 1 in `visible_every` visible ones;
     an altitude record (altitude.question(), balanced later by balance_alt) on every frame."""
-    import altitude
+    import altitude, avoid
     os.makedirs(image_dir, exist_ok=True)
     q2, q3, qa = probe.questions_v2(), probe.questions_v3(), altitude.question()["altitude"]
+    qv = avoid.question()["avoid"]
     rea = list(probe.REAPPEAR)
     v3keys = probe.V3_CONTEXT_KEYS
     recs, n_vis = [], 0
@@ -1272,18 +1288,32 @@ def records_onpolicy(frames, image_dir, rel_prefix="images", visible_every=3):
             recs.append(dict(base, id=stem + "-reappear", question=q3["reappear"], label=rea.index(f["reappear"]),
                              state_text=v3ctx))
         dz = f["dz_m"]
+        ctl = altitude.CONTROL_KEYS if "sensor" in f["context"] else altitude.CONTEXT_KEYS
+        if "avoid" in f:
+            recs.append(dict(base, id=stem + "-avoid", question=qv, label=avoid.OPTIONS.index(f["avoid"]),
+                             avoid=f["avoid"], speed_mps=f["context"].get("speed_mps"), sensor=f["context"]["sensor"],
+                             state_text=json.dumps({k: f["context"].get(k) for k in altitude.CONTROL_KEYS})))
         recs.append(dict(base, id=stem + "-altitude", question=qa,
-                         state_text=json.dumps({k: f["context"].get(k) for k in altitude.CONTEXT_KEYS}),
+                         state_text=json.dumps({k: f["context"].get(k) for k in ctl}),
                          label=int(np.argmin([abs(dz - v) for v in altitude.ALT_LEVELS])),
                          target=soft_target(dz, altitude.ALT_LEVELS)))
     return recs
 
 
 def balance_onpolicy(recs, seed=0):
-    """balance_alt on the altitude records (hold <= ascend + descend); every other record kept."""
+    """balance_alt on the altitude records (hold <= ascend + descend) and keep_course <= 1.5 x (dodge + brake)
+    on the avoid records; every other record kept."""
     alt = [r for r in recs if r["id"].endswith("-altitude")]
-    rest = [r for r in recs if not r["id"].endswith("-altitude")]
+    av = [r for r in recs if r["id"].endswith("-avoid")]
+    rest = [r for r in recs if not r["id"].endswith("-altitude") and not r["id"].endswith("-avoid")]
     kept, before, after = balance_alt(alt, seed=seed)
+    keep_c = [r for r in av if r["avoid"] == "keep_course"]
+    other = [r for r in av if r["avoid"] != "keep_course"]
+    cap = int(1.5 * len(other))
+    if len(keep_c) > cap:
+        idx = np.random.default_rng(seed + 11).choice(len(keep_c), cap, replace=False)
+        keep_c = [keep_c[i] for i in sorted(idx)]
+    rest = rest + keep_c + other
     kinds = {}
     for r in rest + kept:
         k = r["id"].rsplit("-", 1)[-1]

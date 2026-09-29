@@ -226,6 +226,7 @@ SECONDS = 90.0
 
 def render(name, seed=0, directory=".", width=1400, height=320):
     """Top-down view of a course with the rover's path dotted on, as PNG bytes."""
+    name = split_speed(name)[0]            # the same map at any rover speed
     if name.startswith("town"):          # its own map (town.render; flightgif places points with map_px)
         import town
         return town.render(name, seed, directory)
@@ -266,7 +267,40 @@ def render(name, seed=0, directory=".", width=1400, height=320):
     return buf.getvalue()
 
 
+SPEED_RAMP_S = 3.0     # "<course>-x<k>": the rover reaches its k-times speed over this long, from rest
+
+
+def split_speed(name):
+    """"mixed-x4" -> ("mixed", 4.0); "town" -> ("town", 1.0)."""
+    import re
+    mt = re.match(r"^(.*)-x(\d+(?:\.\d+)?)$", name)
+    return (mt.group(1), float(mt.group(2))) if mt else (name, 1.0)
+
+
+def speed_up(c, k, ramp=SPEED_RAMP_S):
+    """The rover k times faster on course `c`, accelerating from rest over `ramp` s. Looped courses (town.py,
+    city.py) scale their own speed; the straight courses warp the time their rover pose is evaluated at."""
+    c.speed_scale = k
+    if hasattr(c, "rover_u"):            # TownCourse / CityCourse: speed and ramp are theirs
+        c.speed = c.speed * k
+        c.ramp_s = ramp
+        if hasattr(c, "seconds"):
+            c.seconds = round((c.seconds - 40.0) / k + 40.0)
+        return c
+    base = c.rover_pose
+
+    def warp(t):
+        return k * (t * t / (2 * ramp) if t < ramp else t - ramp / 2)
+    c.rover_pose = lambda t: base(warp(t))
+    return c
+
+
 def make(name, seed=0):
+    base, k = split_speed(name)
+    if k != 1.0:
+        c = speed_up(make(base, seed), k)
+        c.name = name
+        return c
     if "@" in name:                      # "<course>@<appearance>", e.g. mixed@real: realism.py
         import realism
         return realism.make(name, seed)

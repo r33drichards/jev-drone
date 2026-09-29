@@ -25,6 +25,8 @@ ALT_MAX = 3.2           # setpoint ceiling: over a 2.1 m beam with margin, under
 CRUISE = 1.6            # run.CRUISE_ALT
 OVER_BEAM = 2.9         # the course target over a beam (top 2.1 m; run.CLIMB_ALT is 3.0)
 CONTEXT_KEYS = ("altitude_m", "unseen_for_s", "last_seen_bearing_deg", "last_seen_range_m")
+# with the avoid question (avoid.py) the context also carries the drone's forward speed and its depth sensor
+CONTROL_KEYS = CONTEXT_KEYS + ("speed_mps", "sensor")
 
 _OPTIONS = [
     ("descend_1m", "Well above where it should be: nothing needs clearing here any more, and flying high "
@@ -91,18 +93,23 @@ class SimAltitude:
     instant = True
     delay_s = 0.0
 
-    def __init__(self, target_fn, wrong_p=0.0, wrong=1.0, seed=0):
+    def __init__(self, target_fn, wrong_p=0.0, wrong=1.0, seed=0, avoid=False):
+        self.avoid = bool(avoid)             # also answer avoid.question() from the true sensor (avoid.label)
         self.target_fn, self.wrong_p = target_fn, float(wrong_p)
         self.wrong = wrong if wrong == "random" else float(wrong)
         self.rng = np.random.default_rng([seed, 7919])
         self.model = "sim-altitude(wrong=%g@%s)" % (wrong_p, wrong)
 
     def answer(self, frame, context):
+        out = {}
+        if self.avoid and context.get("sensor"):
+            import avoid
+            out["avoid"] = avoid.label(context["sensor"], context.get("speed_mps") or 0.0)
         if self.wrong_p and self.rng.random() < self.wrong_p:
             if self.wrong == "random":             # data flights: wander off the target altitude
-                return {"dz": float(self.rng.choice(ALT_LEVELS))}
-            return {"dz": self.wrong}
-        return {"dz": label(self.target_fn(), context["altitude_m"])}
+                return dict(out, dz=float(self.rng.choice(ALT_LEVELS)))
+            return dict(out, dz=self.wrong)
+        return dict(out, dz=label(self.target_fn(), context["altitude_m"]))
 
 
 class LayaAltitude:
@@ -111,14 +118,21 @@ class LayaAltitude:
     instant = False
     delay_s = 0.0
 
-    def __init__(self, model=None, sharpen=1.0, device=None, revision=None):
+    def __init__(self, model=None, sharpen=1.0, device=None, revision=None, avoid=False):
         from tactics import shared_laya
         self.agent = shared_laya(model, device, revision)
         self.qs = question()
+        self.avoid = bool(avoid)             # also ask avoid.question() in the same predict (CONTROL_KEYS context)
+        self.keys = CONTROL_KEYS if self.avoid else CONTEXT_KEYS
+        if self.avoid:
+            import avoid as _av
+            self.qs.update(_av.question())
         self.sharpen = float(sharpen)
         self.model = "laya-altitude:" + (model or "default")
         blank = np.zeros((384, 512, 3), dtype=np.uint8)
-        ctx = {"altitude_m": CRUISE, "unseen_for_s": 0.0, "last_seen_bearing_deg": 0.0, "last_seen_range_m": 3.5}
+        ctx = {"altitude_m": CRUISE, "unseen_for_s": 0.0, "last_seen_bearing_deg": 0.0, "last_seen_range_m": 3.5,
+               "speed_mps": 0.0, "sensor": {k: 20.0 for k in ("far_left", "left", "center", "right", "far_right",
+                                                             "path_ahead")}}
         t0 = time.time()
         self.answer(blank, ctx)
         self.warmup_s = round(time.time() - t0, 2)
@@ -126,17 +140,22 @@ class LayaAltitude:
 
     def answer(self, frame, context):
         import laya_pursuit
-        st = laya_pursuit.v3_state(frame, context, keys=CONTEXT_KEYS)
-        a = self.agent.predict(st, self.qs)["answers"]["altitude"]
+        st = laya_pursuit.v3_state(frame, context, keys=self.keys)
+        ans = self.agent.predict(st, self.qs)["answers"]
+        a = ans["altitude"]
         pr = [float(a["probabilities"][str(i)]) for i in range(len(ALT_LEVELS))]
-        return {"dz": round(read(pr, self.sharpen), 3), "probabilities": [round(p, 3) for p in pr]}
+        out = {"dz": round(read(pr, self.sharpen), 3), "probabilities": [round(p, 3) for p in pr]}
+        if self.avoid:
+            out["avoid"] = ans["avoid"]["choice"]
+            out["avoid_probs"] = {k: round(float(v), 3) for k, v in ans["avoid"]["probabilities"].items()}
+        return out
 
 
-def make_backend(mode, target_fn=None, model=None, wrong_p=0.0, wrong=1.0, sharpen=1.0, seed=0):
+def make_backend(mode, target_fn=None, model=None, wrong_p=0.0, wrong=1.0, sharpen=1.0, seed=0, avoid=False):
     if mode == "sim":
-        return SimAltitude(target_fn, wrong_p, wrong, seed)
+        return SimAltitude(target_fn, wrong_p, wrong, seed, avoid=avoid)
     if mode == "laya":
-        return LayaAltitude(model, sharpen)
+        return LayaAltitude(model, sharpen, avoid=avoid)
     raise ValueError("altitude must be sim or laya, got %r" % (mode,))
 
 
@@ -163,6 +182,8 @@ class Altimeter:
         self.n_offer = self.n_rate = self.n_dropped = self.errors = self.n_answers = 0
         self.last_error = None
         self.latency, self.abs_err, self.dzs = [], [], []
+        self.avoid = None                    # the latest avoid answer that has arrived: (answer, frame time)
+        self.avoid_counts, self.avoid_ok = {}, []
         self._stop = threading.Event()
         self._thread = threading.Thread(target=self._worker, daemon=True)
         self._thread.start()
@@ -190,8 +211,10 @@ class Altimeter:
     def read(self, now):
         with self._lock:
             while self._pending and self._pending[0][0] <= now:
-                _, z, dz = self._pending.pop(0)
+                _, z, dz, av, tf = self._pending.pop(0)
                 self.sp = next_setpoint(self.sp, z, dz)
+                if av is not None:
+                    self.avoid = (av, tf)
             return self.sp
 
     def _worker(self):
@@ -212,8 +235,13 @@ class Altimeter:
                 self.dzs.append(a["dz"])
                 if truth is not None:
                     self.abs_err.append(abs(a["dz"] - label(truth, ctx["altitude_m"])))
+                if "avoid" in a:
+                    self.avoid_counts[a["avoid"]] = self.avoid_counts.get(a["avoid"], 0) + 1
+                    if ctx.get("sensor"):
+                        import avoid as _av
+                        self.avoid_ok.append(a["avoid"] == _av.label(ctx["sensor"], ctx.get("speed_mps") or 0.0))
                 with self._lock:
-                    self._pending.append((ready, ctx["altitude_m"], a["dz"]))
+                    self._pending.append((ready, ctx["altitude_m"], a["dz"], a.get("avoid"), t))
             except Exception as e:           # a failed call leaves the setpoint where it was
                 self.errors += 1
                 self.last_error = repr(e)[:200]
@@ -227,7 +255,10 @@ class Altimeter:
                 "median_latency_s": round(float(np.median(self.latency)), 3) if self.latency else None,
                 "dz_mae_m": round(float(np.mean(self.abs_err)), 3) if self.abs_err else None,
                 "ascend_pct": round(100 * float(np.mean(dz > 0.25)), 1) if dz.size else None,
-                "descend_pct": round(100 * float(np.mean(dz < -0.25)), 1) if dz.size else None}
+                "descend_pct": round(100 * float(np.mean(dz < -0.25)), 1) if dz.size else None,
+                **({"avoid_counts": dict(self.avoid_counts),
+                    "avoid_acc": round(float(np.mean(self.avoid_ok)), 3) if self.avoid_ok else None}
+                   if self.avoid_counts else {})}
 
     def close(self):
         self._stop.set()

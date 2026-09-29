@@ -177,6 +177,26 @@ CONFIGS = {
     "hybrid-v2pursuit-alt": (True, "const:hold_course", False, False,
                              {"pursuit": "laya-pursuit", "pursuit_questions": "v2", "reacquire": "laya",
                               "altitude": "laya", "pursuit_model": "/ckpt/smolvlm/drone-rover-v2/last"}),
+    # the avoidance policy (avoid.py) with oracle answers, on the scripted flier: tests the label rule and how
+    # Guidance flies it, before any training; -codeavoid keeps the code's avoidance for comparison
+    "code-alt-avoidsim": (True, "const:hold_course", False, False,
+                          {"pursuit": "code", "altitude": "sim", "avoid": "sim",
+                           "guide_tune": {"aim": "trail", "yaw_rate_dps": 120.0}}),
+    "code-alt-codeavoid": (True, "const:hold_course", False, False,
+                           {"pursuit": "code", "altitude": "sim", "guide_tune": {"aim": "trail", "yaw_rate_dps": 120.0}}),
+    "code-alt-avoidsim-direct": (True, "const:hold_course", False, False,
+                                 {"pursuit": "code", "altitude": "sim", "avoid": "sim", "guide_tune": {"yaw_rate_dps": 120.0}}),
+    "code-alt-codeavoid-direct": (True, "const:hold_course", False, False,
+                                  {"pursuit": "code", "altitude": "sim", "guide_tune": {"yaw_rate_dps": 120.0}}),
+    # data fliers for drone_rover_ctl: correct altitude (wandering 20% of the time) and avoid answers, so the
+    # recorded states are the ones the avoid policy flies into; steering by the scripted pursuit (frames with
+    # the rover in view) or by the --model checkpoint (its own failure states)
+    "data-code": (True, "const:hold_course", False, False,
+                  {"pursuit": "code", "altitude": "sim", "altitude_wrong_p": 0.2, "altitude_wrong": "random",
+                   "avoid": "sim", "guide_tune": {"yaw_rate_dps": 120.0}}),
+    "data-laya": (True, "const:hold_course", False, False,
+                  dict(_V32_PURSUIT, reacquire="laya", altitude="sim", altitude_wrong_p=0.2, altitude_wrong="random",
+                       avoid="sim", guide_tune={"yaw_rate_dps": 120.0})),
     "code-pursuit-simreacq": (True, "const:oracle", False, False, {"pursuit": "code", "reacquire": "sim"}),
     "sim-pursuit-simreacq": (True, "const:oracle", False, False,
                              {"pursuit": "sim-pursuit", "pursuit_noise_deg": 4.0, "pursuit_delay_s": 0.1,
@@ -200,6 +220,10 @@ CONFIGS["laya-full-v3.3-wc-rate"] = CONFIGS["laya-full-v3.3-rt-rate"][:4] + (
     dict(CONFIGS["laya-full-v3.3-rt-rate"][4], timing="wallclock"),)
 # the same configuration under a checkpoint-neutral name (pass the checkpoint with --model)
 CONFIGS["laya-full-wc-rate"] = CONFIGS["laya-full-v3.3-wc-rate"]
+# Laya flies everything including collision avoidance (avoid.py: its avoid answer from frame + depth sensor + speed,
+# in the altitude predict at 6 Hz); the code keeps only an emergency reflex under 1 m. Wall clock.
+CONFIGS["laya-full-wc-avoid"] = CONFIGS["laya-full-wc-rate"][:4] + (
+    dict(CONFIGS["laya-full-wc-rate"][4], avoid="laya"),)
 # a looser yaw-rate cap for the fast town (the rover's bearing can swing faster than 120 deg/s round a corner)
 CONFIGS["laya-full-wc-rate240"] = CONFIGS["laya-full-wc-rate"][:4] + (
     dict(CONFIGS["laya-full-wc-rate"][4], guide_tune={"yaw_rate_dps": 240.0}),)
@@ -563,6 +587,7 @@ ROVER_SET_TAC = ROVER_SET + "_tac"
 ROVER_SET_TOWN = ROVER_SET + "_town"
 ROVER_SET_ALT = ROVER_SET + "_alt"       # altitude.py's ascend / descend operator
 ROVER_SET_ONP = ROVER_SET + "_onpolicy"  # frames from the checkpoint's own real-time flights (DAgger)
+ROVER_SET_CTL = ROVER_SET + "_ctl"        # every environment at 4x (+ some 1x): depth sensor + avoid labels
 ROVER_SET_TOWN_X4 = ROVER_SET + "_town_x4"  # town-x4 (rover 4x faster): perception / reacquisition views
 
 
@@ -676,7 +701,7 @@ def test_frames_alt_job(course: str, seed: int, wander_p: float = 0.3):
 
 @app.function(gpu=["L4", "A10G"], cpu=4, memory=16384, timeout=60 * 60, max_containers=GPU_MAX,
               volumes={"/cache/hf": hf_vol, "/ckpt": ckpt_vol.read_only(), "/data": data_vol})
-def collect_onpolicy_job(course: str, seed: int, split: str, config: str, model: str):
+def collect_onpolicy_job(course: str, seed: int, split: str, config: str, model: str, set_name: str = ""):
     """One flight with `config` flying on `model` (latency-faithful timing) -> its frames' images and records
     (rover_data.collect_flight_onpolicy / records_onpolicy), plus a one-line flight summary."""
     _enter()
@@ -684,7 +709,7 @@ def collect_onpolicy_job(course: str, seed: int, split: str, config: str, model:
     _, _, _, _, pk = _config(config)
     pk = {k: v for k, v in pk.items() if k not in ("pursuit_model", "timing")}
     frames, r = rover_data.collect_flight_onpolicy(course, seed, model, pk)
-    recs = rover_data.records_onpolicy(frames, "/data/vqa/%s/images" % ROVER_SET_ONP)
+    recs = rover_data.records_onpolicy(frames, "/data/vqa/%s/images" % (set_name or ROVER_SET_ONP))
     data_vol.commit()
     summary = {"course": course, "seed": seed, "finished_at_s": r["finished_at_s"],
                "target_visible_pct": r["target_visible_pct"], "frames": len(frames)}
@@ -717,7 +742,7 @@ def finalize_rover_set_v32(name: str, recs_json: list, meta: dict):
                              "after_balance": rover_data.tac_counts(rs),
                              "by_course": {c: rover_data.tac_counts([r for r in rs if r["course"] == c])["groups"]
                                            for c in sorted({r["course"] for r in rs})}}
-        elif name == ROVER_SET_ONP:
+        elif name in (ROVER_SET_ONP, ROVER_SET_CTL):
             rs, report[split] = rover_data.balance_onpolicy(rs, seed=seed)
         elif name == ROVER_SET_ALT:
             rs, before, after = rover_data.balance_alt(rs, seed=seed)
@@ -817,7 +842,15 @@ def gifs(config: str = "laya-image", courses: str = "pockets,mixed", seeds: str 
     jobs = [(k, int(s)) for k in courses.split(",") for s in seeds.split(",")]
     # --seconds 0: each course's own length (tactics 110 s, town 120 s, city 225 s, else 90 s), with the call
     # budget scaled to it (240 per 90 s)
-    secs = {k: seconds or {"tactics": 110.0, "town": 120.0, "city": 225.0}.get(k.split("@")[0], 90.0) for k, _ in jobs}
+    import re
+
+    def course_seconds(k):
+        base = k.split("@")[0]
+        mt = re.match(r"^(.*)-x(\d+(?:\.\d+)?)$", base)
+        if mt:                   # a k-times faster rover: the course takes about 1/k as long
+            return {"tactics": 40.0, "town": 60.0, "city": 90.0}.get(mt.group(1), 35.0)
+        return {"tactics": 110.0, "town": 120.0, "city": 225.0}.get(base, 90.0)
+    secs = {k: seconds or course_seconds(k) for k, _ in jobs}
     calls = [fly_gif.spawn(config, s, secs[k], k, budget if seconds else int(240 * secs[k] / 90), model, realtime)
              for k, s in jobs]
     out = _outdir()
@@ -1051,6 +1084,40 @@ def build_rover_set_onpolicy(config: str = "laya-full-v3.3", model: str = "/ckpt
         "source": "jev-drone rover_data.collect_flight_onpolicy / records_onpolicy / balance_onpolicy",
         "config": config, "model": model, "train": train, "val": val, "timing": "virtual"})
     print("wrote /data/vqa/%s:" % ROVER_SET_ONP, counts)
+    print(json.dumps(report, indent=1))
+
+
+@app.local_entrypoint()
+def build_rover_set_ctl(model: str = "/ckpt/smolvlm/drone-rover-v3.4/best",
+                        x4_train: str = "mixed-x4:30-37,no-climb-x4:50-57,pockets-x4:30-37,tactics-x4:10-17,"
+                                        "town-x4:40-49,city-x4:10-15",
+                        x1_train: str = "mixed:30-33,town:40-43,city:10-11",
+                        val: str = "mixed-x4:46-47,town-x4:60-61,city-x4:20"):
+    """Write /data/vqa/drone_rover_ctl (create-only): every x4 training flight twice, flown by data-code (the
+    scripted pursuit) and data-laya (`model` steering), plus 1x flights by data-code; the val flights by
+    data-laya. Frames carry the depth sensor summary + speed and the avoid label (avoid.py), besides the
+    perception / reacquisition / altitude labels (rover_data.collect_flight_onpolicy / records_onpolicy)."""
+    if rover_set_ready.remote(ROVER_SET_CTL):
+        raise SystemExit("/data/vqa/%s already exists; refusing to overwrite" % ROVER_SET_CTL)
+
+    def parse(spec):
+        out = []
+        for part in spec.split(","):
+            c, rng = part.split(":")
+            a, b = (rng.split("-") + [rng])[:2]
+            out += [(c, s) for s in range(int(a), int(b) + 1)]
+        return out
+    jobs = [(c, s, "train", fl, model if fl == "data-laya" else "", ROVER_SET_CTL)
+            for c, s in parse(x4_train) for fl in ("data-code", "data-laya")]
+    jobs += [(c, s, "train", "data-code", "", ROVER_SET_CTL) for c, s in parse(x1_train)]
+    jobs += [(c, s, "val", "data-laya", model, ROVER_SET_CTL) for c, s in parse(val)]
+    base = lambda c: c.split("-x")[0]  # noqa: E731
+    assert not any(s in TAC_HELD_OUT.get(base(c), ()) for c, s, *_ in jobs), "held-out seed in the jobs"
+    out = _collect_all(collect_onpolicy_job, jobs)
+    counts, report = finalize_rover_set_v32.remote(ROVER_SET_CTL, out, {
+        "source": "jev-drone rover_data.collect_flight_onpolicy / records_onpolicy (avoid + sensor)",
+        "model": model, "x4_train": x4_train, "x1_train": x1_train, "val": val, "timing": "virtual"})
+    print("wrote /data/vqa/%s:" % ROVER_SET_CTL, counts)
     print(json.dumps(report, indent=1))
 
 
