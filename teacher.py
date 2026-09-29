@@ -36,6 +36,75 @@ YAW_RATE = np.deg2rad(120.0)
 STANDOFF = 4.0
 HALF_FOV = np.deg2rad(62.0)  # probe.TAN_H's horizontal half-field
 NOSE = 0.25                  # flight.Eye.NOSE_OFFSET_M
+CELL_M = 0.5                 # navigation grid resolution
+CLEAR_M = 0.5                # a cell is blocked if geometry is within this of it at flying height (8 rays)
+FLY_Z = 1.6                  # the navigation map's height (run.CRUISE_ALT); beams are marked passable
+LEAD_S = 1.0                 # score the path distance to where the rover will be this long after the rollout
+
+
+class NavGrid:
+    """Where the drone can fly at FLY_Z, as a CELL_M grid over the scene's geometry (a cell is blocked when a ray
+    from its centre in any of 8 directions meets geometry within CLEAR_M), beams passable (the altitude control
+    flies over them). field(xy) -> path distances from every cell to xy (8-connected Dijkstra); dist(field, xy)
+    looks one up. Path distance rewards the detour round a pocket that a straight-line distance punishes."""
+
+    def __init__(self, w):
+        m, d = w.m, w.d
+        mujoco.mj_forward(m, d)
+        lo, hi = np.array([1e9, 1e9]), np.array([-1e9, -1e9])
+        for g in range(m.ngeom):
+            if m.geom_type[g] == mujoco.mjtGeom.mjGEOM_PLANE or m.geom_bodyid[g] in (w.x2, w.rover_body):
+                continue
+            p, rb = d.geom_xpos[g][:2], m.geom_rbound[g]
+            lo, hi = np.minimum(lo, p - rb), np.maximum(hi, p + rb)
+        self.lo = lo - 2.0
+        n = np.ceil((hi + 2.0 - self.lo) / CELL_M).astype(int)
+        self.nx, self.ny = int(n[0]), int(n[1])
+        blocked = np.zeros((self.nx, self.ny), dtype=bool)
+        gid = np.array([-1], dtype=np.int32)
+        dirs = [np.array([np.cos(a), np.sin(a), 0.0]) for a in np.arange(8) * np.pi / 4]
+        beams = [(sx - 0.8, sx + 0.8) for kind, sx, _ in getattr(w.c, "stations", []) if kind == "beam"]
+        for i in range(self.nx):
+            x = self.lo[0] + (i + 0.5) * CELL_M
+            if any(a <= x <= b for a, b in beams):
+                continue
+            for j in range(self.ny):
+                p = np.array([x, self.lo[1] + (j + 0.5) * CELL_M, FLY_Z])
+                for v in dirs:
+                    r = mujoco.mj_ray(m, d, p, v, None, 1, w.x2, gid)
+                    if 0 <= r < CLEAR_M and m.geom_bodyid[gid[0]] != w.rover_body:
+                        blocked[i, j] = True
+                        break
+        self.blocked = blocked
+
+    def cell(self, xy):
+        ij = np.floor((np.asarray(xy[:2]) - self.lo) / CELL_M).astype(int)
+        return int(np.clip(ij[0], 0, self.nx - 1)), int(np.clip(ij[1], 0, self.ny - 1))
+
+    def field(self, xy):
+        import heapq
+        dist = np.full((self.nx, self.ny), np.inf)
+        s = self.cell(xy)
+        dist[s] = 0.0
+        h = [(0.0, s)]
+        steps = [(1, 0, 1.0), (-1, 0, 1.0), (0, 1, 1.0), (0, -1, 1.0),
+                 (1, 1, 1.414), (1, -1, 1.414), (-1, 1, 1.414), (-1, -1, 1.414)]
+        while h:
+            dd, (i, j) = heapq.heappop(h)
+            if dd > dist[i, j]:
+                continue
+            for di, dj, c in steps:
+                a, b = i + di, j + dj
+                if 0 <= a < self.nx and 0 <= b < self.ny and not self.blocked[a, b]:
+                    nd = dd + c * CELL_M
+                    if nd < dist[a, b]:
+                        dist[a, b] = nd
+                        heapq.heappush(h, (nd, (a, b)))
+        return dist
+
+    def dist(self, field, xy):
+        v = field[self.cell(xy)]
+        return float(v) if np.isfinite(v) else 60.0
 
 
 def _yaw(q):
@@ -117,7 +186,8 @@ class World:
 
 def score(hit_t, seen, dist_end, seen_end):
     """A rollout's value: a collision dominates (earlier is worse); then the rover in view at the end and over
-    the rollout, and the distance to it near STANDOFF."""
+    the rollout, and the PATH distance (NavGrid, round walls) to where the rover will be LEAD_S after the rollout
+    near STANDOFF."""
     if hit_t is not None:
         return -1000.0 + 100.0 * hit_t
     return 20.0 * seen_end + 10.0 * seen - 2.0 * abs(dist_end - STANDOFF)
@@ -140,11 +210,15 @@ def rollout(w, cmd, t0):
             seen_n += s
             checks += 1
     s_end, dist = w.sees_rover(t0 + n * DT)
+    if getattr(w, "nav_field", None) is not None:
+        dist = w.nav.dist(w.nav_field, w.d.qpos[:2])
     return score(None, seen_n / max(checks, 1), dist, s_end)
 
 
 def decide(w, t):
     """Try every candidate from the current state; restore it. -> (best command, scores)."""
+    if getattr(w, "nav", None) is not None:
+        w.nav_field = w.nav.field(w.c.rover_pose(t + HORIZON_S + LEAD_S))
     mujoco.mj_copyData(w.scratch, w.m, w.d)
     ps = w.pilot_state()
     scores = []
@@ -155,8 +229,9 @@ def decide(w, t):
     return CANDIDATES[int(np.argmax(scores))], scores
 
 
-def fly(course, seed=0, seconds=60.0, alt=1.6):
-    """The teacher flies the course itself (the ceiling check). -> an episode-like result dict."""
+def fly(course, seed=0, seconds=60.0, alt=1.6, path=True):
+    """The teacher flies the course itself (the ceiling check). -> an episode-like result dict. `path`: score
+    the path distance on a NavGrid (else the straight-line distance, the first version)."""
     w = World(course, seed)
     rng = np.random.default_rng(seed)
     if hasattr(w.c, "start_pose"):
@@ -165,6 +240,9 @@ def fly(course, seed=0, seconds=60.0, alt=1.6):
         w.d.qpos[:3] = [1.5 + rng.uniform(-.3, .3), rng.uniform(-.5, .5), alt]
         w.d.qpos[3:7] = [1, 0, 0, 0]
     mujoco.mj_forward(w.m, w.d)
+    t_nav = time.time()
+    w.nav = NavGrid(w) if path else None
+    t_nav = time.time() - t_nav
     lap = w.c.lap_tracker(w.d.qpos[:2].copy()) if getattr(w.c, "looped", False) else None
     end_x = getattr(w.c, "end_x", None)
     n = int(seconds / DT)
@@ -208,7 +286,8 @@ def fly(course, seed=0, seconds=60.0, alt=1.6):
            "mean_standoff_m": round(float(np.mean(standoffs)), 2), "max_x_m": None,
            "decisions": len(decisions), "no_safe_option_pct": round(100 * float(np.mean([d["n_safe"] == 0 for d in decisions])), 1),
            "wall_s": round(time.time() - wall0, 1), "candidates": len(CANDIDATES),
-           "horizon_s": HORIZON_S, "decide_s": DECIDE_S}
+           "horizon_s": HORIZON_S, "decide_s": DECIDE_S, "path_score": bool(path),
+           "nav_grid_s": round(t_nav, 1)}
     if lap is not None:
         lap.report(out, standoffs)
     out["ok"] = bool(out.get("finished_at_s") is not None or out.get("lap_done_at_s"))
