@@ -1222,15 +1222,15 @@ def collect_flight_onpolicy(course, seed, model, flight_kw, seconds=None):
         z = float(pos[2])
         target = float(c.altitude_target(pos))
         sens = avoid.sensor(sc)
-        v = avoid.forward_speed(data.qvel[:3], yaw)
+        v, rel = avoid.travel(data.qvel[:3], yaw)
         ctx = {"altitude_m": round(z, 2), "unseen_for_s": 0.0 if vis else tg["unseen_for_s"],
                "last_seen_bearing_deg": None if seen is None else round(_wrap_deg(seen[1] - np.rad2deg(yaw - seen[3])), 1),
                "last_seen_range_m": None if seen is None else round(seen[2], 2),
-               "speed_mps": round(v, 2), "sensor": sens}
+               "speed_mps": round(v, 2), "travel_deg": round(rel, 0), "lidar": sens}
         buf = io.BytesIO()
         Image.fromarray(self.last_rgb).save(buf, "JPEG", quality=90)
         frames.append({"course": course, "seed": seed, "t": round(t, 2), "jpeg": buf.getvalue(), "context": ctx,
-                       "avoid": avoid.label(sens, v),
+                       "avoid": avoid.label_cmd(self.lidar, data.qvel[:3], yaw),
                        "visible": vis, "pixels": int(tg["pixels"]),
                        "bearing_deg": float(tg["bearing_deg"]) if vis else 0.0,
                        "range_m": float(tg["range_m"]) if vis else 0.0,
@@ -1256,7 +1256,7 @@ def records_onpolicy(frames, image_dir, rel_prefix="images", visible_every=3):
     import altitude, avoid
     os.makedirs(image_dir, exist_ok=True)
     q2, q3, qa = probe.questions_v2(), probe.questions_v3(), altitude.question()["altitude"]
-    qv = avoid.question()["avoid"]
+    qv = avoid.question()
     rea = list(probe.REAPPEAR)
     v3keys = probe.V3_CONTEXT_KEYS
     recs, n_vis = [], 0
@@ -1288,11 +1288,16 @@ def records_onpolicy(frames, image_dir, rel_prefix="images", visible_every=3):
             recs.append(dict(base, id=stem + "-reappear", question=q3["reappear"], label=rea.index(f["reappear"]),
                              state_text=v3ctx))
         dz = f["dz_m"]
-        ctl = altitude.CONTROL_KEYS if "sensor" in f["context"] else altitude.CONTEXT_KEYS
+        ctl = altitude.CONTROL_KEYS if "lidar" in f["context"] else altitude.CONTEXT_KEYS
         if "avoid" in f:
-            recs.append(dict(base, id=stem + "-avoid", question=qv, label=avoid.OPTIONS.index(f["avoid"]),
-                             avoid=f["avoid"], speed_mps=f["context"].get("speed_mps"), sensor=f["context"]["sensor"],
-                             state_text=json.dumps({k: f["context"].get(k) for k in altitude.CONTROL_KEYS})))
+            cap, sl = f["avoid"]
+            ctl_text = json.dumps({k: f["context"].get(k) for k in altitude.CONTROL_KEYS})
+            extra = dict(safe_speed=cap, slide=sl, speed_mps=f["context"].get("speed_mps"), state_text=ctl_text)
+            t = soft_target(cap, avoid.SPEED_LEVELS)
+            recs.append(dict(base, id=stem + "-safe_speed", question=qv["safe_speed"], label=int(np.argmax(t)),
+                             target=t, **extra))
+            t = soft_target(sl, avoid.SLIDE_LEVELS)
+            recs.append(dict(base, id=stem + "-slide", question=qv["slide"], label=int(np.argmax(t)), target=t, **extra))
         recs.append(dict(base, id=stem + "-altitude", question=qa,
                          state_text=json.dumps({k: f["context"].get(k) for k in ctl}),
                          label=int(np.argmin([abs(dz - v) for v in altitude.ALT_LEVELS])),
@@ -1301,14 +1306,16 @@ def records_onpolicy(frames, image_dir, rel_prefix="images", visible_every=3):
 
 
 def balance_onpolicy(recs, seed=0):
-    """balance_alt on the altitude records (hold <= ascend + descend) and keep_course <= 1.5 x (dodge + brake)
-    on the avoid records; every other record kept."""
+    """balance_alt on the altitude records (hold <= ascend + descend) and, on the safe_speed / slide records,
+    free flight <= 1.5 x the rest; every other record kept."""
     alt = [r for r in recs if r["id"].endswith("-altitude")]
-    av = [r for r in recs if r["id"].endswith("-avoid")]
-    rest = [r for r in recs if not r["id"].endswith("-altitude") and not r["id"].endswith("-avoid")]
+    isav = lambda r: r["id"].endswith("-safe_speed") or r["id"].endswith("-slide")  # noqa: E731
+    av = [r for r in recs if isav(r)]
+    rest = [r for r in recs if not r["id"].endswith("-altitude") and not isav(r)]
     kept, before, after = balance_alt(alt, seed=seed)
-    keep_c = [r for r in av if r["avoid"] == "keep_course"]
-    other = [r for r in av if r["avoid"] != "keep_course"]
+    # free flight (full safe speed, no slide) capped at 1.5 x the frames that call for avoiding
+    keep_c = [r for r in av if r["safe_speed"] >= 6.9 and abs(r["slide"]) < 0.25]
+    other = [r for r in av if not (r["safe_speed"] >= 6.9 and abs(r["slide"]) < 0.25)]
     cap = int(1.5 * len(other))
     if len(keep_c) > cap:
         idx = np.random.default_rng(seed + 11).choice(len(keep_c), cap, replace=False)

@@ -425,19 +425,18 @@ class Guidance:
         if self.k > 1 and not self.avoid_mode:
             fwd = min(fwd, max(0.25, float(np.sqrt(2 * BRAKE_ACC * max(0.0, scene["path_ahead_m"] - BRAKE_MARGIN_M)))))
         if self.avoid_mode and avoid_ans is not None and t - avoid_ans[1] < 0.6:
-            # Laya's collision-avoidance answer (avoid.py), from its frame + depth sensor + speed
-            av = avoid_ans[0]
-            self.avoid_steps[av] = self.avoid_steps.get(av, 0) + 1
-            if av in ("dodge_left", "dodge_right"):
-                slide = (1.0 if av == "dodge_left" else -1.0) * 2.2
-                fwd = min(fwd, max(1.0, 0.5 * fwd))
-            elif av == "brake":
-                fwd = min(fwd, 0.3)
+            # Laya's graded collision avoidance (avoid.py): a safe forward speed and a sideways slide, from its
+            # frame + the lidar + its speed and direction of travel
+            cap, sl = avoid_ans[0]
+            fwd = min(fwd, float(cap))
+            slide = float(sl)
+            w = "dodge" if abs(sl) >= 1.0 else ("brake" if cap < 1.0 else "clear")
+            self.avoid_steps[w] = self.avoid_steps.get(w, 0) + 1
 
         # --- hard reflex: code overrides everything, Jev included ------------------
         # Reflex on what is in the path, not on what is merely alongside.
         near, nb = scene["path_ahead_m"], np.deg2rad(scene["nearest_bearing_deg"])
-        reflex = near < (EMERGENCY_REFLEX_M if self.avoid_mode else REFLEX_M)
+        reflex = near < (getattr(self, "emergency_m", EMERGENCY_REFLEX_M) if self.avoid_mode else REFLEX_M)
         if reflex and self.avoid_mode:
             self.n_emergency += 1
         if reflex:
@@ -481,7 +480,7 @@ def episode(seed=0, seconds=35.0, use_jev=True, video=None, hz=None, budget=None
             reacquire_hz=3.0, reacquire_params=None, reacquire_wrong_p=0.0, reacquire_delay_s=0.0,
             tactics_kw=None, appearance=None, altitude=None, altitude_model=None, altitude_hz=3.0,
             altitude_wrong_p=0.0, altitude_wrong=1.0, altitude_sharpen=1.0, record_rgb=False, yaw_desat=False,
-            timing="wall", record_every=100, speed_scale=None, avoid=None, avoid_hz=6.0):
+            timing="wall", record_every=100, speed_scale=None, avoid=None, avoid_hz=6.0, emergency_m=None):
     """`record`: a list to append a snapshot to every 0.2 s of sim time (pose, obstacles,
     judgment, and the camera frame the model saw), for rendering after the flight
     (flightgif.py). Cheap, so the flight stays real time.
@@ -624,6 +623,8 @@ def episode(seed=0, seconds=35.0, use_jev=True, video=None, hz=None, budget=None
         raise ValueError("avoid rides on the altitude stream: set altitude too")
     guide = Guidance(eye, search_lead_s, search_on_hold, speed_law=law, tune=guide_tune, reacq=rq, speed_scale=k,
                      avoid_mode=avoid is not None)
+    if emergency_m is not None:
+        guide.emergency_m = float(emergency_m)
     loc = None
     if pursuit != "code":
         import laya_pursuit
@@ -757,8 +758,9 @@ def episode(seed=0, seconds=35.0, use_jev=True, video=None, hz=None, budget=None
                     actx.update(seen.context(yaw, fix if loc else scene["target"]))
                 if avoid:
                     import avoid as avmod
-                    actx["speed_mps"] = round(avmod.forward_speed(d.qvel[:3], yaw), 2)
-                    actx["sensor"] = avmod.sensor(scene)
+                    sp, rel = avmod.travel(d.qvel[:3], yaw)
+                    actx.update(speed_mps=round(sp, 2), travel_deg=round(rel, 0), lidar=avmod.sensor(scene))
+                    actx[altmod.TRUTH_KEY] = avmod.label_cmd(eye.lidar, d.qvel[:3], yaw)
                 t_off = time.time()
                 altim.offer(eye.last_rgb, t, actx)
                 if altim.lockstep and realtime:

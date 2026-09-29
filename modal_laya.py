@@ -197,6 +197,11 @@ CONFIGS = {
     "data-laya": (True, "const:hold_course", False, False,
                   dict(_V32_PURSUIT, reacquire="laya", altitude="sim", altitude_wrong_p=0.2, altitude_wrong="random",
                        avoid="sim", guide_tune={"yaw_rate_dps": 120.0})),
+    **{"code-alt-avoidsim-" + s: (True, "const:hold_course", False, False,
+                                  dict({"pursuit": "code", "altitude": "sim", "avoid": "sim",
+                                        "guide_tune": {"yaw_rate_dps": 120.0}}, **kw))
+       for s, kw in (("hz15", {"avoid_hz": 15.0}), ("em22", {"emergency_m": 2.2}),
+                     ("hz15em22", {"avoid_hz": 15.0, "emergency_m": 2.2}))},
     "code-pursuit-simreacq": (True, "const:oracle", False, False, {"pursuit": "code", "reacquire": "sim"}),
     "sim-pursuit-simreacq": (True, "const:oracle", False, False,
                              {"pursuit": "sim-pursuit", "pursuit_noise_deg": 4.0, "pursuit_delay_s": 0.1,
@@ -587,7 +592,7 @@ ROVER_SET_TAC = ROVER_SET + "_tac"
 ROVER_SET_TOWN = ROVER_SET + "_town"
 ROVER_SET_ALT = ROVER_SET + "_alt"       # altitude.py's ascend / descend operator
 ROVER_SET_ONP = ROVER_SET + "_onpolicy"  # frames from the checkpoint's own real-time flights (DAgger)
-ROVER_SET_CTL = ROVER_SET + "_ctl"        # every environment at 4x (+ some 1x): depth sensor + avoid labels
+ROVER_SET_CTL = ROVER_SET + "_lidar"      # every environment at 4x (+ some 1x): lidar + avoid labels
 ROVER_SET_TOWN_X4 = ROVER_SET + "_town_x4"  # town-x4 (rover 4x faster): perception / reacquisition views
 
 

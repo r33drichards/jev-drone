@@ -25,8 +25,11 @@ ALT_MAX = 3.2           # setpoint ceiling: over a 2.1 m beam with margin, under
 CRUISE = 1.6            # run.CRUISE_ALT
 OVER_BEAM = 2.9         # the course target over a beam (top 2.1 m; run.CLIMB_ALT is 3.0)
 CONTEXT_KEYS = ("altitude_m", "unseen_for_s", "last_seen_bearing_deg", "last_seen_range_m")
-# with the avoid question (avoid.py) the context also carries the drone's forward speed and its depth sensor
-CONTROL_KEYS = CONTEXT_KEYS + ("speed_mps", "sensor")
+# with the avoid question (avoid.py) the context also carries the drone's forward speed and its lidar summary
+CONTROL_KEYS = CONTEXT_KEYS + ("speed_mps", "travel_deg", "lidar")
+# the flight puts the true avoid label (avoid.label_scan on the full scan) in the context under this key, for the
+# sim backend and for scoring; it is not a CONTROL_KEYS key, so Laya never sees it
+TRUTH_KEY = "_avoid_truth"
 
 _OPTIONS = [
     ("descend_1m", "Well above where it should be: nothing needs clearing here any more, and flying high "
@@ -102,9 +105,8 @@ class SimAltitude:
 
     def answer(self, frame, context):
         out = {}
-        if self.avoid and context.get("sensor"):
-            import avoid
-            out["avoid"] = avoid.label(context["sensor"], context.get("speed_mps") or 0.0)
+        if self.avoid and context.get(TRUTH_KEY):
+            out["avoid"] = context[TRUTH_KEY]
         if self.wrong_p and self.rng.random() < self.wrong_p:
             if self.wrong == "random":             # data flights: wander off the target altitude
                 return dict(out, dz=float(self.rng.choice(ALT_LEVELS)))
@@ -131,8 +133,7 @@ class LayaAltitude:
         self.model = "laya-altitude:" + (model or "default")
         blank = np.zeros((384, 512, 3), dtype=np.uint8)
         ctx = {"altitude_m": CRUISE, "unseen_for_s": 0.0, "last_seen_bearing_deg": 0.0, "last_seen_range_m": 3.5,
-               "speed_mps": 0.0, "sensor": {k: 20.0 for k in ("far_left", "left", "center", "right", "far_right",
-                                                             "path_ahead")}}
+               "speed_mps": 0.0, "travel_deg": 0.0, "lidar": {"sectors": [20.0] * 24}}
         t0 = time.time()
         self.answer(blank, ctx)
         self.warmup_s = round(time.time() - t0, 2)
@@ -146,8 +147,10 @@ class LayaAltitude:
         pr = [float(a["probabilities"][str(i)]) for i in range(len(ALT_LEVELS))]
         out = {"dz": round(read(pr, self.sharpen), 3), "probabilities": [round(p, 3) for p in pr]}
         if self.avoid:
-            out["avoid"] = ans["avoid"]["choice"]
-            out["avoid_probs"] = {k: round(float(v), 3) for k, v in ans["avoid"]["probabilities"].items()}
+            import avoid as _av
+            ps = [float(ans["safe_speed"]["probabilities"][str(i)]) for i in range(len(_av.SPEED_LEVELS))]
+            pl = [float(ans["slide"]["probabilities"][str(i)]) for i in range(len(_av.SLIDE_LEVELS))]
+            out["avoid"] = (round(_av.read(ps, _av.SPEED_LEVELS), 2), round(_av.read(pl, _av.SLIDE_LEVELS), 2))
         return out
 
 
@@ -236,10 +239,10 @@ class Altimeter:
                 if truth is not None:
                     self.abs_err.append(abs(a["dz"] - label(truth, ctx["altitude_m"])))
                 if "avoid" in a:
-                    self.avoid_counts[a["avoid"]] = self.avoid_counts.get(a["avoid"], 0) + 1
-                    if ctx.get("sensor"):
-                        import avoid as _av
-                        self.avoid_ok.append(a["avoid"] == _av.label(ctx["sensor"], ctx.get("speed_mps") or 0.0))
+                    self.avoid_counts["answers"] = self.avoid_counts.get("answers", 0) + 1
+                    if ctx.get(TRUTH_KEY):          # (|speed error|, |slide error|) against the true command
+                        tc, ts = ctx[TRUTH_KEY]
+                        self.avoid_ok.append((abs(a["avoid"][0] - tc), abs(a["avoid"][1] - ts)))
                 with self._lock:
                     self._pending.append((ready, ctx["altitude_m"], a["dz"], a.get("avoid"), t))
             except Exception as e:           # a failed call leaves the setpoint where it was
@@ -256,8 +259,9 @@ class Altimeter:
                 "dz_mae_m": round(float(np.mean(self.abs_err)), 3) if self.abs_err else None,
                 "ascend_pct": round(100 * float(np.mean(dz > 0.25)), 1) if dz.size else None,
                 "descend_pct": round(100 * float(np.mean(dz < -0.25)), 1) if dz.size else None,
-                **({"avoid_counts": dict(self.avoid_counts),
-                    "avoid_acc": round(float(np.mean(self.avoid_ok)), 3) if self.avoid_ok else None}
+                **({"avoid_answers": self.avoid_counts.get("answers", 0),
+                    "avoid_speed_mae": round(float(np.mean([e[0] for e in self.avoid_ok])), 3) if self.avoid_ok else None,
+                    "avoid_slide_mae": round(float(np.mean([e[1] for e in self.avoid_ok])), 3) if self.avoid_ok else None}
                    if self.avoid_counts else {})}
 
     def close(self):

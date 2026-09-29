@@ -170,6 +170,60 @@ class Pilot:
 # --------------------------------------------------------------------------- #
 # perception
 # --------------------------------------------------------------------------- #
+class Lidar:
+    """A 360-degree scanning 2D lidar at the drone's centre, specified like a small spinning unit (RPLidar /
+    Slamtec class): N_BEAMS horizontal rays (1 degree), RANGE_M reach, +-NOISE multiplicative range noise from a
+    seeded stream, HZ scans a second. Rays are cast against the scene geometry (mj_ray, the drone's own body
+    excluded). scan() -> per-beam ranges (m; beam 0 on the nose, counter-clockwise = to the left).
+    summary() is what Laya reads: the nearest return in each of N_SECTORS sectors round the drone."""
+    N_BEAMS = 360
+    RANGE_M = 20.0
+    NOISE = 0.02
+    HZ = 10.0
+    N_SECTORS = 24                # 15-degree sectors
+    HALF_WIDTH_M = 0.75           # the drone's half-width (0.35 m) plus a 0.4 m margin: the swept strip
+
+    def __init__(self, model, seed=0):
+        self.m = model
+        self.body = model.body("x2").id
+        self.ang = np.arange(self.N_BEAMS) * (2 * np.pi / self.N_BEAMS)
+        self.rng = np.random.default_rng([seed, 5099])
+        self.last = np.full(self.N_BEAMS, self.RANGE_M)
+        self.last_t = -1e9
+        self.yaw = 0.0
+
+    def scan(self, data, pos, yaw, t=None):
+        """A new scan at most HZ times a (sim) second; between scans the last one stands (re-referenced to the
+        yaw it was taken at by the caller's summary)."""
+        if t is not None and t - self.last_t < 1.0 / self.HZ - 1e-6:
+            return self.last
+        out = np.full(self.N_BEAMS, self.RANGE_M)
+        gid = np.array([-1], dtype=np.int32)
+        p = np.asarray(pos, dtype=float).copy()
+        for i, a in enumerate(self.ang):
+            v = np.array([np.cos(yaw + a), np.sin(yaw + a), 0.0])
+            r = mujoco.mj_ray(self.m, data, p, v, None, 1, self.body, gid)
+            if 0 <= r < self.RANGE_M:
+                out[i] = r
+        out = np.minimum(out * (1.0 + self.NOISE * self.rng.standard_normal(self.N_BEAMS)), self.RANGE_M)
+        self.last = np.maximum(out, 0.05)
+        self.last_t = t if t is not None else self.last_t
+        self.yaw = float(yaw)
+        return self.last
+
+    def summary(self, yaw=None):
+        """{"sectors": [N_SECTORS nearest returns, from dead ahead counter-clockwise (index 0 centred on the nose,
+        6 = left, 12 = behind, 18 = right)], "yaw_age_deg": how far the drone has turned since the scan}."""
+        a = self.ang
+        k = np.round(a / (2 * np.pi / self.N_SECTORS)).astype(int) % self.N_SECTORS
+        sec = [round(float(self.last[k == i].min()), 1) for i in range(self.N_SECTORS)]
+        return {"sectors": sec}
+
+    def points(self):
+        """The last scan as (x forward, y left) points in the frame the scan was taken in, with the ranges."""
+        return self.last * np.cos(self.ang), self.last * np.sin(self.ang), self.last
+
+
 class Eye:
     """Onboard forward camera -> symbolic scene summary.
 
@@ -206,6 +260,7 @@ class Eye:
         self.shell_ids = np.array([model.geom(n).id for n in shell], dtype=int)
         self.wall_ids = [model.geom(n).id for n in walls]   # (left, right)
         self.m = model
+        self.lidar = Lidar(model)            # the 360-degree scanning lidar, one scan per camera frame
         self.depth = mujoco.Renderer(model, self.H, self.W)
         self.depth.enable_depth_rendering()
         self.seg = mujoco.Renderer(model, self.H, self.W)
@@ -376,6 +431,8 @@ class Eye:
                 "nearest_obstacle_m": round(nearest, 2),
                 "nearest_bearing_deg": nearest_brg,
                 "target": target}
+        self.lidar.scan(data, pos, yaw, t)
+        out["lidar"] = self.lidar.summary()
         return out
 
     def _bearing_arr(self, cols):
