@@ -19,6 +19,7 @@ CRUISE_ALT = 1.6
 CHASE_FOVY = 50.0        # cinematic lens for the third-person render
 CLIMB_ALT = 3.0          # beams top out at 2.1; this clears them with margin
 CLIMB_HOLD_STEPS = 90    # ~1.8 s at 50 Hz guidance
+GUIDE_DT = 0.02          # Guidance runs every 10 physics steps of 2 ms
 REFLEX_M = 2.2           # code-owned: below this, Jev's opinion is irrelevant
 TRACE = int(os.environ.get("TRACE") or 0)   # 1: every judgment change; 2: also the state twice a second
 
@@ -87,6 +88,7 @@ class Guidance:
         # pursuit / avoidance tuning against S-shaped paths (pathmetrics.py); empty = the behaviour below
         # unchanged. Keys: "slide" ("off" | "hyst" | "center"), "slide_hyst_m", "center_gain",
         # "yaw_tau_s" (low-pass on the pursuit heading), "yaw_db_deg" (soft deadband on the bearing),
+        # "yaw_rate_dps" (cap on how fast the yaw command may move, every branch: pursuit, search, reflex),
         # "aim" ("track": steer at the smoothed world fix, not the raw bearing), "aim_tau_s", "aim_lead_s"
         self.tune = dict(tune or {})
         self._aim_hdg = self._aim_w = self._slide_side = None
@@ -103,6 +105,7 @@ class Guidance:
         self.sweep = 0.0
         self.lost_for = 0.0
         self.climb_hold = 0
+        self._yaw_cmd = None            # tune["yaw_rate_dps"]: the rate-limited yaw command
         self.commit = None
         self.commit_left = 0
         self.search_yaw = None
@@ -395,6 +398,16 @@ class Guidance:
         if fresh:
             self.yaw_sp = absolute_yaw if absolute_yaw is not None else yaw + yaw_rel + turn_bias
         yaw_cmd = self.yaw_sp
+        rate = float(self.tune.get("yaw_rate_dps", 0.0))
+        if rate > 0 and yaw_cmd is not None:
+            # yaw-rate cap: ramp the command toward the setpoint at most `rate` deg/s (a step of up to 0.6 rad per
+            # camera frame is a ~9 rad/s demand: the yaw torque saturates the motors and flight.Pilot's airmode
+            # turns that into lift). Kept within 0.6 rad of the live yaw so it never winds up.
+            wrap = lambda a: (a + np.pi) % (2 * np.pi) - np.pi  # noqa: E731
+            prev = yaw if self._yaw_cmd is None else yaw + float(np.clip(wrap(self._yaw_cmd - yaw), -0.6, 0.6))
+            step = np.deg2rad(rate) * GUIDE_DT
+            yaw_cmd = prev + float(np.clip(wrap(yaw_cmd - prev), -step, step))
+            self._yaw_cmd = yaw_cmd
 
         # never slide sideways faster than the forward view can clear
         lat = float(np.clip(slide, -2.6, 2.6))

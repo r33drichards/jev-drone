@@ -186,6 +186,12 @@ CONFIGS = {
 # answer landing at its measured GPU latency in sim time, queued on one GPU, and the world never slowed for it
 for _n in ("hybrid-v2pursuit-alt", "hybrid-v2pursuit-alt-desat", "laya-full-v3.3", "laya-alt"):
     CONFIGS[_n + "-rt"] = CONFIGS[_n][:4] + (dict(CONFIGS[_n][4], timing="virtual"),)
+# heading smoothing against the airmode balloons (run.Guidance tune): a low-pass on the pursuit heading, a cap on
+# the yaw command's rate, and both
+for _s, _t in (("tau", {"yaw_tau_s": 0.3}), ("rate", {"yaw_rate_dps": 120.0}),
+               ("smooth", {"yaw_tau_s": 0.3, "yaw_rate_dps": 120.0})):
+    CONFIGS["laya-full-v3.3-rt-" + _s] = CONFIGS["laya-full-v3.3-rt"][:4] + (
+        dict(CONFIGS["laya-full-v3.3-rt"][4], guide_tune=_t),)
 
 
 def _config(name):
