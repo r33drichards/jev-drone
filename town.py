@@ -68,6 +68,8 @@ import os
 import numpy as np
 
 ROVER_SPEED = 1.15
+RAMP_FAST_S = 3.0          # town-x<k>: the rover reaches its speed over this long (a drone at rest behind a rover
+                           # that starts at 4.6 m/s is 15 m back and out of sight within 3 s)
 R_FRONT = 3.5            # rover path radius round the house's street corners (centred on the corner)
 R_BACK = 1.8             # ... and round its back corners: tight, so a drone > ~5 m behind loses sight at them
 HOUSE = (9.0, 15.0, -4.0, 4.0)      # east house footprint (x0, x1, y0, y1); the west one is mirrored in x
@@ -284,7 +286,10 @@ class TownCourse:
         return p, float(np.arctan2(h[1], h[0]))
 
     def rover_u(self, t):
-        return self.u0 + self.speed * t
+        ramp = getattr(self, "ramp_s", 0.0)     # town-x<k>: accelerate from rest over ramp_s, not jump to speed
+        if ramp > 0 and t < ramp:
+            return self.u0 + self.speed * t * t / (2 * ramp)
+        return self.u0 + self.speed * (t - ramp / 2)
 
     def rover_pose(self, t):
         p, _ = self._at(self.rover_u(t))
@@ -414,6 +419,7 @@ def make(name="town", seed=0):
     if name.startswith("town-x"):        # "town-x4": the same loop with the rover k times faster
         c = TownCourse("town", seed)
         c.speed = ROVER_SPEED * float(name[len("town-x"):])
+        c.ramp_s = RAMP_FAST_S
         c.name = name
         return c
     if name != "town":
