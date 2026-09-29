@@ -665,6 +665,9 @@ def teacher_fly(course: str, seed: int, seconds: float):
 def teacher_record_job(course: str, seed: int, seconds: float, split: str):
     """The teacher flies one course recording every decision (teacher.fly record=True); write the frames to the
     teacher set's images and return its cmd_speed / cmd_slide / cmd_turn records (soft targets) + a summary."""
+    cache = "/data/vqa/%s/_recs/%s-%d-%s.json" % (ROVER_SET_TEACHER, course, seed, split)
+    if os.path.exists(cache):                  # flown already (a restarted build resumes)
+        return open(cache).read()
     _enter()
     import teacher, command
     r = teacher.fly(course, seed, seconds, record=True)
@@ -682,9 +685,22 @@ def teacher_record_job(course: str, seed: int, seconds: float, split: str):
                          "state_text": st, "label": int(max(range(len(tgt)), key=tgt.__getitem__)), "target": tgt,
                          "course": course, "seed": seed, "t": s["t"], "best": s["best"], "visible": s["visible"],
                          "split": split})
+    out = json.dumps(recs + [dict({k: r[k] for k in ("course", "seed", "ok", "target_visible_pct", "collisions")},
+                                  split="_flight")], default=float)
+    os.makedirs(os.path.dirname(cache), exist_ok=True)
+    open(cache, "w").write(out)
     data_vol.commit()
-    return json.dumps(recs + [dict({k: r[k] for k in ("course", "seed", "ok", "target_visible_pct", "collisions")},
-                                   split="_flight")], default=float)
+    return out
+
+
+@app.function(cpu=1, memory=8192, timeout=6 * 60 * 60, volumes={"/data": data_vol})
+def teacher_set_coordinator(jobs: list, meta: dict):
+    """Fly every teacher job and finalize the set, all on Modal, so the build survives the client going away;
+    each flight is cached on the volume, so a rerun only flies the missing ones."""
+    out = _collect_all(teacher_record_job, [tuple(j) for j in jobs])
+    counts, report = finalize_rover_set_v32.local(ROVER_SET_TEACHER, out, meta)
+    print("wrote /data/vqa/%s:" % ROVER_SET_TEACHER, counts, flush=True)
+    print(json.dumps(report, indent=1), flush=True)
 
 
 @app.local_entrypoint()
@@ -707,11 +723,9 @@ def build_rover_set_teacher(train: str = "mixed-x4:30-41,no-climb-x4:50-61,pocke
             out += [(c, s, lengths.get(base, 35.0), split) for s in range(int(a), int(b) + 1)]
         return out
     jobs = parse(train, "train") + parse(val, "val")
-    out = _collect_all(teacher_record_job, jobs)
-    counts, report = finalize_rover_set_v32.remote(ROVER_SET_TEACHER, out, {
+    fc = teacher_set_coordinator.spawn(jobs, {
         "source": "jev-drone teacher.fly(record=True) + command.soft_targets", "train": train, "val": val})
-    print("wrote /data/vqa/%s:" % ROVER_SET_TEACHER, counts)
-    print(json.dumps(report, indent=1))
+    print("coordinator", fc.object_id, "for", len(jobs), "flights; run with --detach and follow the app logs")
 
 
 @app.local_entrypoint()
