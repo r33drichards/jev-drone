@@ -1,0 +1,106 @@
+{
+ "sharpen0.5": {
+  "n": 1632,
+  "dz_mae_m": 0.136,
+  "dz_mae_const_hold_m": 0.24,
+  "spearman": 0.902,
+  "ascend": {
+   "n": 66,
+   "mae_m": 0.637,
+   "said_ascend": 0.439,
+   "said_descend": 0.0
+  },
+  "descend": {
+   "n": 363,
+   "mae_m": 0.285,
+   "said_ascend": 0.003,
+   "said_descend": 0.667
+  },
+  "hold": {
+   "n": 1203,
+   "mae_m": 0.063,
+   "said_ascend": 0.014,
+   "said_descend": 0.012
+  },
+  "pocket_low_false_ascend": 0.001,
+  "beam_ascend_recall": 0.446
+ },
+ "sharpen1": {
+  "n": 1632,
+  "dz_mae_m": 0.086,
+  "dz_mae_const_hold_m": 0.24,
+  "spearman": 0.913,
+  "ascend": {
+   "n": 66,
+   "mae_m": 0.588,
+   "said_ascend": 0.621,
+   "said_descend": 0.03
+  },
+  "descend": {
+   "n": 363,
+   "mae_m": 0.134,
+   "said_ascend": 0.006,
+   "said_descend": 0.923
+  },
+  "hold": {
+   "n": 1203,
+   "mae_m": 0.044,
+   "said_ascend": 0.011,
+   "said_descend": 0.043
+  },
+  "pocket_low_false_ascend": 0.001,
+  "beam_ascend_recall": 0.631
+ },
+ "sharpen1.5": {
+  "n": 1632,
+  "dz_mae_m": 0.08,
+  "dz_mae_const_hold_m": 0.24,
+  "spearman": 0.909,
+  "ascend": {
+   "n": 66,
+   "mae_m": 0.577,
+   "said_ascend": 0.621,
+   "said_descend": 0.076
+  },
+  "descend": {
+   "n": 363,
+   "mae_m": 0.097,
+   "said_ascend": 0.006,
+   "said_descend": 0.937
+  },
+  "hold": {
+   "n": 1203,
+   "mae_m": 0.047,
+   "said_ascend": 0.007,
+   "said_descend": 0.053
+  },
+  "pocket_low_false_ascend": 0.001,
+  "beam_ascend_recall": 0.631
+ },
+ "sharpen2": {
+  "n": 1632,
+  "dz_mae_m": 0.085,
+  "dz_mae_const_hold_m": 0.24,
+  "spearman": 0.909,
+  "ascend": {
+   "n": 66,
+   "mae_m": 0.577,
+   "said_ascend": 0.621,
+   "said_descend": 0.106
+  },
+  "descend": {
+   "n": 363,
+   "mae_m": 0.09,
+   "said_ascend": 0.006,
+   "said_descend": 0.939
+  },
+  "hold": {
+   "n": 1203,
+   "mae_m": 0.057,
+   "said_ascend": 0.007,
+   "said_descend": 0.053
+  },
+  "pocket_low_false_ascend": 0.001,
+  "beam_ascend_recall": 0.631
+ }
+}

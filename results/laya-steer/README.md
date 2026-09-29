@@ -212,6 +212,39 @@ one-shot operator (tactics.ConstBackend wrong_p), "+1 m" for the altitude operat
 | 20% | 1/36 | 26/36 |
 
 v3.2a's single-threshold climb made false climbs at about that rate (4.8% of pocket frames at 0.1543).
-The altitude operator tolerates 10% of them with no loss. Next: drone_rover_alt
-(rover_data.collect_flight_alt: oracle flights whose altitude answers are randomly replaced 20-35% of the
-time, so the aircraft visits heights above and below the target), a fine-tune, and flights.
+The altitude operator tolerates 10% of them with no loss.
+
+### drone-rover-v3.3: Laya flies altitude (`results/laya/20260929-002941`)
+
+**Data:** drone_rover_alt (`modal_laya.py::build_rover_set_alt`, rover_data.collect_flight_alt). Oracle
+flights on pockets, mixed, tactics and town whose altitude answers are randomly replaced 20% or 35% of the
+time, so the aircraft spends time too high and too low. Each frame is labelled with the move toward the
+course target, with soft targets over the five levels. Hold is subsampled to at most ascend + descend:
+7,958 train records (1,428 ascend, 2,551 descend, 3,979 hold) and 1,290 val. Seeds are disjoint from every
+evaluation seed.
+
+**Fine-tune:** from v3.2a/best, the v3.2 mix plus drone_rover_alt=15, 24.6 min on an A100. Val level accuracy
+on drone_rover_alt 0.893; tac 0.997, town 0.941, v2 0.927, all held.
+
+**Probe** (1,632 held-out frames: mixed 24-26, no-climb 24-25, tactics 0-1; read-out power 1):
+mean error 0.086 m (always-hold: 0.24 m), Spearman 0.91. A false ascend at a pocket wall while low: 0.1% of
+frames (v3.2a's climb answer: 4.8%). Ascend before a beam: 63% of frames, several per approach. Descend
+when high: 92%.
+
+**Flights, 24 seeds on each of mixed and no-climb** (90 s, budget 240):
+
+| config | pursuit | reacquire | altitude | mixed | no-climb | total |
+|---|---|---|---|---|---|---|
+| code pursuit (bar), oracle climb | code | – | oracle climb | – | – | 45/48 |
+| laya-tactics-v3.2-vote (before) | code | – | v3.2a climb, 3 votes | 16 | 22 | 38/48 |
+| **laya-alt** | code | – | **v3.3 ascend/descend** | **24** | 21 | **45/48** |
+| hybrid-v2pursuit-v3.2-vote (before) | v2 | v3.2a | v3.2a climb, 3 votes | 20 | 21 | 41/48 |
+| **hybrid-v2pursuit-alt** (all Laya) | v2 | v3.3 | v3.3 ascend/descend | 21 | 21 | **42/48** |
+
+- **Laya flying altitude matches the code with oracle climbs** (45/48), and finished all 24 mixed flights.
+  Every mixed failure of the all-Laya hybrid got past the beam (max x 51-79). Those losses are pursuit and
+  reacquisition, not altitude.
+- The three laya-alt no-climb failures (seeds 0, 4, 9) held cruise (1.54-1.68 m) through the first pocket
+  and lost the rover there. Code pursuit with the oracle finishes these seeds. The only visible difference is a
+  ±0.07 m setpoint jitter, from re-anchoring each near-zero answer to the measured altitude. A deadband
+  (keep the setpoint when |dz| < 0.2 m) would remove it; not yet tried.
