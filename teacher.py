@@ -40,6 +40,7 @@ CELL_M = 0.5                 # navigation grid resolution
 CLEAR_M = 0.5                # a cell is blocked if geometry is within this of it at flying height (8 rays)
 FLY_Z = 1.6                  # the navigation map's height (run.CRUISE_ALT); beams are marked passable
 LEAD_S = 1.0                 # score the path distance to where the rover will be this long after the rollout
+WALL_COST = 8.0              # path cost multiplier through a blocked cell
 
 
 class NavGrid:
@@ -95,16 +96,17 @@ class NavGrid:
                 continue
             for di, dj, c in steps:
                 a, b = i + di, j + dj
-                if 0 <= a < self.nx and 0 <= b < self.ny and not self.blocked[a, b]:
-                    nd = dd + c * CELL_M
+                if 0 <= a < self.nx and 0 <= b < self.ny:
+                    # walls are passable at WALL_COST x: a rover inside a pocket (in by a hatch the drone cannot fit
+                    # through) must still have a finite distance -- all-unreachable scores left the teacher aimless
+                    nd = dd + c * CELL_M * (WALL_COST if self.blocked[a, b] else 1.0)
                     if nd < dist[a, b]:
                         dist[a, b] = nd
                         heapq.heappush(h, (nd, (a, b)))
         return dist
 
     def dist(self, field, xy):
-        v = field[self.cell(xy)]
-        return float(v) if np.isfinite(v) else 60.0
+        return float(field[self.cell(xy)])
 
 
 def _yaw(q):
