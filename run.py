@@ -494,6 +494,7 @@ def episode(seed=0, seconds=35.0, use_jev=True, video=None, hz=None, budget=None
     if timing == "wallclock":
         import laya_server
         laya_server.start()          # before any backend is built: tactics.shared_laya routes to it
+        laya_server.reclaim()        # a reused container: the last flight's workers held pipes
         laya_server.reset_stats()
         realtime = True
     gpu = None
@@ -903,6 +904,8 @@ def episode(seed=0, seconds=35.0, use_jev=True, video=None, hz=None, budget=None
         out.update(max_behind_s=round(max_behind, 3), behind_pct=round(100 * n_behind / max(n, 1), 2))
     if timing == "wallclock":
         out["laya_server"] = laya_server.stats(len(standoffs) * dt)
+        if not out["laya_server"]["calls"]:
+            out["invalid"] = "no Laya call reached the server"
     if gpu is not None:
         out["gpu_clock"] = gpu.stats(len(standoffs) * dt)
     if altim is not None:

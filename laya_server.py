@@ -81,6 +81,19 @@ def start():
     _pool[:] = [a for a, _ in pairs]
 
 
+def reclaim():
+    """Hand every pipe back to the pool and invalidate the pipes cached by earlier threads. Call at the start of
+    each flight: a container reused for the next flight keeps the server (and its loaded checkpoints), but the
+    last flight's worker threads, now closed, never returned their pipes (with N_PIPES pipes and ~4 workers per
+    flight, the second flight ran out and every Laya call failed)."""
+    global _gen
+    if _server is None:
+        return
+    with _pool_lock:
+        _gen += 1
+        _pool[:] = list(_server[1])
+
+
 def active():
     return _server is not None
 
