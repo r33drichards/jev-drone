@@ -278,3 +278,30 @@ their frame, altitude 2.5/s, reacquisition 2.5/s while lost.
   the next thing to try.
 - v2 steering is now clearly worse than v3.3 (36/48, town 3/6): it answers 7.6 times a second against 10.9,
   since two checkpoints share the GPU, and it was never trained on the town or the latest data.
+
+## Lookahead teacher: the 4x ceiling check (`teacher.py`, `results/teacher/`)
+
+Every hand-written rule caps what Laya can learn by imitating it. teacher.py has no rule: four times a second it
+saves the simulator and the flight controller, tries 45 candidate commands (forward speed -1..6.5 m/s x side
+slide x heading offset from the rover) for 0.5 s each followed by a brake to hover over a 2 s lookahead, with the
+rover driving as it really will, scores what happened (a collision dominates, then rover in view, then distance
+near 4 m), restores the state and flies the best. It uses privileged information (where the rover is and will be),
+in the spirit of AlphaZero (github.com/ericjang/autogo): search makes the targets, a network learns them.
+
+Ceiling check: the teacher flies every 4x course itself, 12 seeds each (CPU, ~30x real time).
+
+| 4x course | teacher | best hand-written controller, perfect perception |
+|---|---|---|
+| town-x4 | **12/12**, rover in view 100% (median), 0 collisions | 8/12 |
+| city-x4 | **12/12**, 99.7%, 0 collisions | 12/12 |
+| pockets-x4 | **11/12**, 79% | 1-3/12 |
+| tactics-x4 | **10/12**, 80% | 0/4 |
+| mixed-x4 | 5/12, 22% | 4/12 |
+| no-climb-x4 | 4/12, 18% | 2/4 |
+
+Zero collisions and zero crashes in all 72 flights. The 4x rover is flyable; the hand-written pursuit and avoidance
+were the limit. The teacher's own failures (mixed, no-climb) lose the rover, not the aircraft: its 2 s lookahead
+and "rover in view" score cannot plan the detour round a pocket or past the decoy. A longer horizon or a score for
+staying close to where the rover is going is the next teacher improvement. Two design points mattered: holding a
+command for the whole horizon left no safe option in 16% of decisions (commit 0.5 s then brake instead), and a
+1.2 s horizon steered into fences it could no longer avoid (2 s: none).
