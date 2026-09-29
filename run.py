@@ -417,7 +417,7 @@ def episode(seed=0, seconds=35.0, use_jev=True, video=None, hz=None, budget=None
             speed_law="auto", speed_params=None, guide_tune=None, reacquire=None, reacquire_model=None,
             reacquire_hz=3.0, reacquire_params=None, reacquire_wrong_p=0.0, reacquire_delay_s=0.0,
             tactics_kw=None, appearance=None, altitude=None, altitude_model=None, altitude_hz=3.0,
-            altitude_wrong_p=0.0, altitude_wrong=1.0, altitude_sharpen=1.0, record_rgb=False):
+            altitude_wrong_p=0.0, altitude_wrong=1.0, altitude_sharpen=1.0, record_rgb=False, yaw_desat=True):
     """`record`: a list to append a snapshot to every 0.2 s of sim time (pose, obstacles,
     judgment, and the camera frame the model saw), for rendering after the flight
     (flightgif.py). Cheap, so the flight stays real time.
@@ -495,6 +495,7 @@ def episode(seed=0, seconds=35.0, use_jev=True, video=None, hz=None, budget=None
     mujoco.mj_forward(m, d)
 
     pilot = flight.Pilot(m)
+    pilot.yaw_desat = bool(yaw_desat)     # False: the old airmode mixing (yaw demand can add lift)
     if reacquire not in (None, "sim", "laya"):
         raise ValueError("reacquire must be None, sim or laya, got %r" % (reacquire,))
     eye = flight.Eye(m, rgb_size=(512, 384) if ((use_jev and (laya_image or backend == "laya-v3"))

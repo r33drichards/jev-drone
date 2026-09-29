@@ -167,6 +167,11 @@ CONFIGS = {
     # oracle's only other answer is climb, which the altitude operator replaces)
     # v3.3 alone, every decision: its own pursuit (v3.2a's fitted read-out), reacquisition and altitude
     "laya-full-v3.3": (True, "const:hold_course", False, False, dict(_V32_PURSUIT, reacquire="laya", altitude="laya")),
+    # the same with the old airmode mixing (flight.Pilot.yaw_desat off): isolates the yaw-desaturation fix
+    "hybrid-v2pursuit-alt-nodesat": (True, "const:hold_course", False, False,
+                                     {"pursuit": "laya-pursuit", "pursuit_questions": "v2", "reacquire": "laya",
+                                      "altitude": "laya", "pursuit_model": "/ckpt/smolvlm/drone-rover-v2/last",
+                                      "yaw_desat": False}),
     "laya-alt": (True, "const:hold_course", False, False, {"pursuit": "code", "altitude": "laya"}),
     "hybrid-v2pursuit-alt": (True, "const:hold_course", False, False,
                              {"pursuit": "laya-pursuit", "pursuit_questions": "v2", "reacquire": "laya",
