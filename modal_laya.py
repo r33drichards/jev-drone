@@ -534,6 +534,7 @@ def test_frames_v3b_job(course: str, seed: int, kind: str):
 ROVER_SET_TAC = ROVER_SET + "_tac"
 ROVER_SET_TOWN = ROVER_SET + "_town"
 ROVER_SET_ALT = ROVER_SET + "_alt"       # altitude.py's ascend / descend operator
+ROVER_SET_ONP = ROVER_SET + "_onpolicy"  # frames from the checkpoint's own real-time flights (DAgger)
 
 
 @app.function(cpu=1, timeout=120, volumes={"/data": data_vol})
@@ -592,6 +593,23 @@ def test_frames_alt_job(course: str, seed: int, wander_p: float = 0.3):
     return json.dumps(rows, default=float), blobs
 
 
+@app.function(gpu=["L4", "A10G"], cpu=4, memory=16384, timeout=60 * 60, max_containers=GPU_MAX,
+              volumes={"/cache/hf": hf_vol, "/ckpt": ckpt_vol.read_only(), "/data": data_vol})
+def collect_onpolicy_job(course: str, seed: int, split: str, config: str, model: str):
+    """One flight with `config` flying on `model` (latency-faithful timing) -> its frames' images and records
+    (rover_data.collect_flight_onpolicy / records_onpolicy), plus a one-line flight summary."""
+    _enter()
+    import rover_data
+    _, _, _, _, pk = _config(config)
+    pk = {k: v for k, v in pk.items() if k not in ("pursuit_model", "timing")}
+    frames, r = rover_data.collect_flight_onpolicy(course, seed, model, pk)
+    recs = rover_data.records_onpolicy(frames, "/data/vqa/%s/images" % ROVER_SET_ONP)
+    data_vol.commit()
+    summary = {"course": course, "seed": seed, "finished_at_s": r["finished_at_s"],
+               "target_visible_pct": r["target_visible_pct"], "frames": len(frames)}
+    return json.dumps([dict(rr, split=split) for rr in recs] + [dict(summary, split="_flight")], default=float)
+
+
 @app.function(cpu=1, memory=8192, timeout=15 * 60, volumes={"/data": data_vol})
 def finalize_rover_set_v32(name: str, recs_json: list, meta: dict):
     """Balance per split (tac: rover_data.balance_tac; town: balance_reappear), write <split>.jsonl, meta.json,
@@ -603,9 +621,11 @@ def finalize_rover_set_v32(name: str, recs_json: list, meta: dict):
     if os.path.exists(os.path.join(base, "_READY")):
         raise SystemExit("%s already exists; refusing to overwrite" % base)
     by = collections.defaultdict(list)
+    flights = []
     for chunk in recs_json:
         for r in json.loads(chunk):
-            by[r.pop("split")].append(r)
+            sp = r.pop("split")
+            (flights if sp == "_flight" else by[sp]).append(r)
     counts, report = {}, {}
     for split, rs in sorted(by.items()):
         seed = 0 if split == "train" else 1
@@ -616,6 +636,8 @@ def finalize_rover_set_v32(name: str, recs_json: list, meta: dict):
                              "after_balance": rover_data.tac_counts(rs),
                              "by_course": {c: rover_data.tac_counts([r for r in rs if r["course"] == c])["groups"]
                                            for c in sorted({r["course"] for r in rs})}}
+        elif name == ROVER_SET_ONP:
+            rs, report[split] = rover_data.balance_onpolicy(rs, seed=seed)
         elif name == ROVER_SET_ALT:
             rs, before, after = rover_data.balance_alt(rs, seed=seed)
             report[split] = {"groups_before": before, "groups_after": after,
@@ -627,7 +649,8 @@ def finalize_rover_set_v32(name: str, recs_json: list, meta: dict):
             for r in rs:
                 f.write(json.dumps(r) + "\n")
         counts[split] = len(rs)
-    json.dump(dict(meta, counts=counts, report=report), open(os.path.join(base, "meta.json"), "w"), indent=1)
+    json.dump(dict(meta, counts=counts, report=report, **({"flights": flights} if flights else {})),
+              open(os.path.join(base, "meta.json"), "w"), indent=1)
     open(os.path.join(base, "_READY"), "w").close()      # last: the loaders skip a set without it
     data_vol.commit()
     return counts, report
@@ -919,6 +942,33 @@ def build_rover_set_alt(train_seeds: str = "30,31,32,33,34,35,36,37,38,39,40,41"
         "train_seeds": train_seeds, "val_seeds": val_seeds, "town_train": town_train, "town_val": town_val,
         "wander": wander})
     print("wrote /data/vqa/%s:" % ROVER_SET_ALT, counts)
+    print(json.dumps(report, indent=1))
+
+
+@app.local_entrypoint()
+def build_rover_set_onpolicy(config: str = "laya-full-v3.3", model: str = "/ckpt/smolvlm/drone-rover-v3.3/best",
+                             train: str = "pockets:30-41,mixed:30-41,tactics:10-17,no-climb:50-57,town:10-15",
+                             val: str = "pockets:46-47,mixed:46-47,tactics:20-21,town:20"):
+    """Write /data/vqa/drone_rover_onpolicy (create-only): `config` flies on `model` with latency-faithful timing
+    and every frame it saw is labelled from the sim (rover_data.collect_flight_onpolicy). `train` / `val`:
+    course:first-last seed ranges, all outside the evaluation seeds (TAC_HELD_OUT)."""
+    if rover_set_ready.remote(ROVER_SET_ONP):
+        raise SystemExit("/data/vqa/%s already exists; refusing to overwrite" % ROVER_SET_ONP)
+
+    def parse(spec, split):
+        out = []
+        for part in spec.split(","):
+            c, rng = part.split(":")
+            a, b = (rng.split("-") + [rng])[:2]
+            out += [(c, s, split, config, model) for s in range(int(a), int(b) + 1)]
+        return out
+    jobs = parse(train, "train") + parse(val, "val")
+    assert not any(s in TAC_HELD_OUT.get(c, ()) for c, s, *_ in jobs), "held-out seed in the jobs"
+    out = _collect_all(collect_onpolicy_job, jobs)
+    counts, report = finalize_rover_set_v32.remote(ROVER_SET_ONP, out, {
+        "source": "jev-drone rover_data.collect_flight_onpolicy / records_onpolicy / balance_onpolicy",
+        "config": config, "model": model, "train": train, "val": val, "timing": "virtual"})
+    print("wrote /data/vqa/%s:" % ROVER_SET_ONP, counts)
     print(json.dumps(report, indent=1))
 
 

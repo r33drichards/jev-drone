@@ -1173,3 +1173,119 @@ def score_alt(preds, sharpen=1.0):
 def _spearman(a, b):
     ra, rb = np.argsort(np.argsort(a)), np.argsort(np.argsort(b))
     return float(np.corrcoef(ra, rb)[0, 1])
+
+
+# ---- drone_rover_onpolicy: frames from Laya's own flights (DAgger) ----
+# The fine-tunes so far learned from oracle / code flights, so they never saw the states their own delayed,
+# noisy decisions lead to: behind on a turn, off-centre at a pocket, lost in the wrong place. Here the
+# checkpoint flies (latency-faithful timing, run.episode timing="virtual") and every frame it saw is labelled
+# afterwards from the sim: v2 perception (segmentation visible / bearing / range), v3 occluded and reappear
+# (laya_pursuit.reappear_truth), and the altitude move (courses altitude_target). No reappear_eta (it needs a
+# look ahead in geometry). Frames every ONPOLICY_LOST_S while the rover is out of sight, ONPOLICY_SEEN_S
+# otherwise.
+ONPOLICY_LOST_S, ONPOLICY_SEEN_S = 0.25, 0.6
+
+
+def collect_flight_onpolicy(course, seed, model, flight_kw, seconds=None):
+    """-> (frames, the episode result). `flight_kw`: run.episode arguments of the flying configuration
+    (modal_laya CONFIGS pursuit kwargs); `model`: its checkpoint (laya_model / pursuit_model default)."""
+    import run, flight, courses, altitude, laya_pursuit
+    from PIL import Image
+    seconds = seconds or V3_SECONDS.get(course, 90.0)
+    c = courses.make(course, seed)
+    frames, sightings = [], []
+    st = {"last": -1e9}
+    orig_look = flight.Eye.look
+
+    def look(self, data, pos, yaw, t):
+        sc = orig_look(self, data, pos, yaw, t)
+        tg = sc["target"]
+        vis = bool(tg["visible"])
+        if vis:
+            sightings.append((t, float(tg["bearing_deg"]), float(tg["range_m"]), float(yaw)))
+        gap = ONPOLICY_SEEN_S if vis else ONPOLICY_LOST_S
+        if t - st["last"] < gap - 1e-6 or self.last_rgb is None:
+            return sc
+        st["last"] = t
+        seen = sightings[-1] if sightings else None
+        side, b3, occl = laya_pursuit.reappear_truth(self.m, data, c.rover_pose, t, vis)
+        z = float(pos[2])
+        target = float(c.altitude_target(pos))
+        ctx = {"altitude_m": round(z, 2), "unseen_for_s": 0.0 if vis else tg["unseen_for_s"],
+               "last_seen_bearing_deg": None if seen is None else round(_wrap_deg(seen[1] - np.rad2deg(yaw - seen[3])), 1),
+               "last_seen_range_m": None if seen is None else round(seen[2], 2)}
+        buf = io.BytesIO()
+        Image.fromarray(self.last_rgb).save(buf, "JPEG", quality=90)
+        frames.append({"course": course, "seed": seed, "t": round(t, 2), "jpeg": buf.getvalue(), "context": ctx,
+                       "visible": vis, "pixels": int(tg["pixels"]),
+                       "bearing_deg": float(tg["bearing_deg"]) if vis else 0.0,
+                       "range_m": float(tg["range_m"]) if vis else 0.0,
+                       "occluded": bool(occl), "reappear": side, "reappear_bearing_deg": round(b3, 2),
+                       "altitude_m": round(z, 2), "target_alt_m": target, "dz_m": round(altitude.label(target, z), 3),
+                       "pos": [round(float(v), 2) for v in pos]})
+        return sc
+
+    flight.Eye.look = look
+    try:
+        r = run.episode(seed, seconds, use_jev=True, backend="const:hold_course", course=course,
+                        laya_model=model, pursuit_model=model, timing="virtual", **flight_kw)
+    finally:
+        flight.Eye.look = orig_look
+    return frames, r
+
+
+def records_onpolicy(frames, image_dir, rel_prefix="images", visible_every=3):
+    """v2 visible / where / steer7 / range8 (soft targets) on every visible frame and 1 in `visible_every`
+    of them for visible; occluded / reappear on every lost frame and on 1 in `visible_every` visible ones;
+    an altitude record (altitude.question(), balanced later by balance_alt) on every frame."""
+    import altitude
+    os.makedirs(image_dir, exist_ok=True)
+    q2, q3, qa = probe.questions_v2(), probe.questions_v3(), altitude.question()["altitude"]
+    rea = list(probe.REAPPEAR)
+    v3keys = probe.V3_CONTEXT_KEYS
+    recs, n_vis = [], 0
+    for f in frames:
+        stem = "onp-%s-%d-%06.2f" % (f["course"], f["seed"], f["t"])
+        open(os.path.join(image_dir, stem + ".jpg"), "wb").write(f["jpeg"])
+        vis = f["visible"]
+        base = {"image": "%s/%s.jpg" % (rel_prefix, stem), "course": f["course"], "seed": f["seed"], "t": f["t"],
+                "visible": vis, "pixels": f["pixels"], "bearing_deg": round(f["bearing_deg"], 2),
+                "range_m": round(f["range_m"], 2), "occluded": f["occluded"], "reappear": f["reappear"],
+                "altitude_m": f["altitude_m"], "target_alt_m": f["target_alt_m"], "dz_m": f["dz_m"], "pos": f["pos"],
+                "station_kind": "none"}
+        v3ctx = json.dumps({k: f["context"].get(k) for k in v3keys})
+        extra = not vis
+        if vis:
+            extra = n_vis % visible_every == 0
+            n_vis += 1
+            recs.append(dict(base, id=stem + "-where", question=q2["where"], label=_where(True, f["bearing_deg"])))
+            t = soft_target(f["bearing_deg"], probe.STEER7_CENTRES)
+            recs.append(dict(base, id=stem + "-steer7", question=q2["steer7"], label=int(np.argmax(t)), target=t))
+            t = soft_target(f["range_m"], probe.RANGE8_CENTRES)
+            recs.append(dict(base, id=stem + "-range8", question=q2["range8"], label=int(np.argmax(t)), target=t))
+        if extra:
+            recs.append(dict(base, id=stem + "-visible", question=q2["visible"], label=int(vis)))
+            if not vis:
+                recs.append(dict(base, id=stem + "-where", question=q2["where"], label=3))
+            recs.append(dict(base, id=stem + "-occluded", question=q3["occluded"], label=int(f["occluded"]),
+                             state_text=v3ctx))
+            recs.append(dict(base, id=stem + "-reappear", question=q3["reappear"], label=rea.index(f["reappear"]),
+                             state_text=v3ctx))
+        dz = f["dz_m"]
+        recs.append(dict(base, id=stem + "-altitude", question=qa,
+                         state_text=json.dumps({k: f["context"].get(k) for k in altitude.CONTEXT_KEYS}),
+                         label=int(np.argmin([abs(dz - v) for v in altitude.ALT_LEVELS])),
+                         target=soft_target(dz, altitude.ALT_LEVELS)))
+    return recs
+
+
+def balance_onpolicy(recs, seed=0):
+    """balance_alt on the altitude records (hold <= ascend + descend); every other record kept."""
+    alt = [r for r in recs if r["id"].endswith("-altitude")]
+    rest = [r for r in recs if not r["id"].endswith("-altitude")]
+    kept, before, after = balance_alt(alt, seed=seed)
+    kinds = {}
+    for r in rest + kept:
+        k = r["id"].rsplit("-", 1)[-1]
+        kinds[k] = kinds.get(k, 0) + 1
+    return rest + kept, {"altitude_before": before, "altitude_after": after, "by_question": kinds}
