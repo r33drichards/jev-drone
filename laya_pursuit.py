@@ -334,10 +334,10 @@ class RangeSpeed:
                 self.t_meas = t_est
                 self.n_meas += 1
         if self.r is None:                      # never seen: the code's not-visible speed
-            return min(1.15 * 1.5 + 1.35, self.lost_cap)
+            return min(1.15 * 1.5 + self.cruise, self.lost_cap)
         lost_for = t - self.t_meas
         if not visible and lost_for > self.coast_s:
-            return min(1.15 * 1.5 + 1.35, self.lost_cap)
+            return min(1.15 * 1.5 + self.cruise, self.lost_cap)
         e = self.r - self.standoff
         e = np.sign(e) * max(abs(e) - self.deadband_m, 0.0)
         fwd = self.cruise + self.gain * e

@@ -411,8 +411,13 @@ def make(name="town", seed=0):
     if "@" in name:                      # "town@real": realism.py
         import realism
         return realism.make(name, seed)
+    if name.startswith("town-x"):        # "town-x4": the same loop with the rover k times faster
+        c = TownCourse("town", seed)
+        c.speed = ROVER_SPEED * float(name[len("town-x"):])
+        c.name = name
+        return c
     if name != "town":
-        raise KeyError("unknown town course %r (only 'town')" % name)
+        raise KeyError("unknown town course %r ('town', 'town-x<k>')" % name)
     return TownCourse(name, seed)
 
 

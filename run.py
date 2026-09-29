@@ -26,6 +26,8 @@ TRACE = int(os.environ.get("TRACE") or 0)   # 1: every judgment change; 2: also 
 
 ROVER_SPEED = 1.15
 SEARCH_SPEED = 2.4
+FWD_CAP_FAST = 7.0       # forward-speed cap when speed_scale > 1
+BRAKE_ACC, BRAKE_MARGIN_M = 4.0, 1.5    # speed_scale > 1: v <= sqrt(2 a (path_ahead - margin))
 TARGET_MAX_SPEED = 1.6   # the rover cannot move faster than this; clamp the estimate       # while searching, still out-pace the rover
 
 
@@ -83,8 +85,16 @@ class Guidance:
     open space and flying into it, not by sliding blindly.
     """
 
-    def __init__(self, eye, search_lead_s=5.0, search_on_hold=False, speed_law=None, tune=None, reacq=None):
+    def __init__(self, eye, search_lead_s=5.0, search_on_hold=False, speed_law=None, tune=None, reacq=None,
+                 speed_scale=1.0):
         self.eye = eye
+        # a faster rover (town-x<k>): cruise / search speeds and the rover-speed clamp scale with it, the
+        # forward cap with it up to FWD_CAP_FAST (the airframe's 28 deg tilt limit)
+        k = float(speed_scale)
+        self.k = k
+        self.fwd_cap = min(3.6 * k, FWD_CAP_FAST) if k > 1 else 3.6
+        self.search_speed = min(SEARCH_SPEED * k, FWD_CAP_FAST - 0.5) if k > 1 else SEARCH_SPEED
+        self.target_max_speed = TARGET_MAX_SPEED * k
         # pursuit / avoidance tuning against S-shaped paths (pathmetrics.py); empty = the behaviour below
         # unchanged. Keys: "slide" ("off" | "hyst" | "center"), "slide_hyst_m", "center_gain",
         # "yaw_tau_s" (low-pass on the pursuit heading), "yaw_db_deg" (soft deadband on the bearing),
@@ -274,8 +284,8 @@ class Guidance:
                     if t1 - t0 >= 0.4:
                         v = (w1 - w0) / (t1 - t0)
                         sp = np.linalg.norm(v)
-                        if sp > TARGET_MAX_SPEED:          # cannot be faster than the rover
-                            v = v / sp * TARGET_MAX_SPEED
+                        if sp > self.target_max_speed:     # cannot be faster than the rover
+                            v = v / sp * self.target_max_speed
                         self.tgt_v = 0.6 * self.tgt_v + 0.4 * v
         else:
             rng = STANDOFF + 1.5
@@ -289,7 +299,7 @@ class Guidance:
         if self.tune:
             yaw_rel = self._tuned_yaw(tgt, yaw, t, pos, fresh)
         absolute_yaw = None
-        fwd = float(np.clip(1.15 * (rng - STANDOFF) + 1.35, 0.0, 3.6))
+        fwd = float(np.clip(1.15 * (rng - STANDOFF) + 1.35 * self.k, 0.0, self.fwd_cap))
         if self.speed_law is not None:
             fwd = self.speed_law(t, bool(tgt["visible"]), tgt["range_m"], tgt.get("t_est"), tgt["bearing_deg"],
                                  yaw, vel)
@@ -359,7 +369,7 @@ class Guidance:
                     self.yaw_sp = self._search_heading(yaw, t, pos) + 0.45 * np.sin(self.sweep)
                 absolute_yaw = self.yaw_sp
                 # must out-run the rover, or a lost target can never be regained
-                fwd, slide, turn_bias = SEARCH_SPEED, 0.0, 0.0
+                fwd, slide, turn_bias = self.search_speed, 0.0, 0.0
                 self.n_search_steps += 1
             else:
                 acted = False                      # hold_course changes nothing
@@ -372,7 +382,7 @@ class Guidance:
                 self.sweep += 0.3
                 self.yaw_sp = self._search_heading(yaw, t, pos) + 0.35 * np.sin(self.sweep)
             absolute_yaw = self.yaw_sp
-            fwd, slide = SEARCH_SPEED, 0.0
+            fwd, slide = self.search_speed, 0.0
             self.n_search_steps += 1
 
         if reacq_h is not None and (not tactical or mv in ("hold_course", "reacquire")):
@@ -385,6 +395,11 @@ class Guidance:
             acted = acted or (tactical and mv == "reacquire")
             self.n_reacq_steps += 1
             self.reacq_side_steps[reacq_h[1]] = self.reacq_side_steps.get(reacq_h[1], 0) + 1
+
+        # --- braking limit for a faster rover (speed_scale > 1): never faster than we can stop from in the
+        # clear path ahead (BRAKE_ACC, BRAKE_MARGIN_M); off at normal speed, where the reflex below suffices
+        if self.k > 1:
+            fwd = min(fwd, max(0.25, float(np.sqrt(2 * BRAKE_ACC * max(0.0, scene["path_ahead_m"] - BRAKE_MARGIN_M)))))
 
         # --- hard reflex: code overrides everything, Jev included ------------------
         # Reflex on what is in the path, not on what is merely alongside.
@@ -431,7 +446,7 @@ def episode(seed=0, seconds=35.0, use_jev=True, video=None, hz=None, budget=None
             reacquire_hz=3.0, reacquire_params=None, reacquire_wrong_p=0.0, reacquire_delay_s=0.0,
             tactics_kw=None, appearance=None, altitude=None, altitude_model=None, altitude_hz=3.0,
             altitude_wrong_p=0.0, altitude_wrong=1.0, altitude_sharpen=1.0, record_rgb=False, yaw_desat=False,
-            timing="wall", record_every=100):
+            timing="wall", record_every=100, speed_scale=None):
     """`record`: a list to append a snapshot to every 0.2 s of sim time (pose, obstacles,
     judgment, and the camera frame the model saw), for rendering after the flight
     (flightgif.py). Cheap, so the flight stays real time.
@@ -485,6 +500,9 @@ def episode(seed=0, seconds=35.0, use_jev=True, video=None, hz=None, budget=None
     owns the GPU and answers the questions one at a time; the sim runs paced to the wall clock and nothing
     waits for Laya. Valid only while the sim holds 1x: the result reports max_behind_s and behind_pct
     (share of steps more than 50 ms behind the wall clock); the sim alone runs ~4.5x real time.
+
+    `speed_scale`: scale the pursuit's speeds for a rover k times faster (default: the course's own factor,
+    e.g. 4 on town-x4; Guidance speed_scale, and RangeSpeed cruise / caps / rover speed).
 
     `appearance`: realism.py's real-world look (textures, sky, scanned clutter) for a courses.py course, as a
     spec ("real", "tex+sky+c20", ...) or dict; None (default) leaves the scene as it is. A course-name suffix
@@ -543,12 +561,23 @@ def episode(seed=0, seconds=35.0, use_jev=True, video=None, hz=None, budget=None
     model_range = pursuit in ("laya-pursuit", "sim-pursuit")      # the pursuit's range is a model's
     if speed_law not in ("auto", "robust", "code"):
         raise ValueError("speed_law must be auto, robust or code, got %r" % speed_law)
+    if speed_scale is None:
+        speed_scale = 1.0
+        if course.startswith("town-x"):
+            speed_scale = float(course[len("town-x"):].split("@")[0])
+    k = float(speed_scale)
     law = None
     if model_range and speed_law in ("auto", "robust"):
         import laya_pursuit
-        law = laya_pursuit.RangeSpeed(**(speed_params or {}))
-    guide = Guidance(eye, search_lead_s, search_on_hold, speed_law=law, tune=guide_tune,
-                     reacq=None if reacquire is None else dict(reacquire_params or {}))
+        sp = dict(speed_params or {})
+        if k > 1:
+            sp = dict(dict(cruise=1.35 * k, fwd_max=min(3.6 * k, FWD_CAP_FAST), lost_cap=min(2.4 * k, FWD_CAP_FAST - 0.5),
+                           rover_speed=1.15 * k, target_max_speed=1.6 * k), **sp)
+        law = laya_pursuit.RangeSpeed(**sp)
+    rq = None if reacquire is None else dict(reacquire_params or {})
+    if rq is not None and k > 1:
+        rq.setdefault("cap", min(REACQ_DEFAULTS["cap"] * k, FWD_CAP_FAST - 0.5))
+    guide = Guidance(eye, search_lead_s, search_on_hold, speed_law=law, tune=guide_tune, reacq=rq, speed_scale=k)
     loc = None
     if pursuit != "code":
         import laya_pursuit
