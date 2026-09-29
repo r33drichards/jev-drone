@@ -32,6 +32,7 @@ class Pilot:
         self.max_acc = 7.5            # slew the velocity command; step changes tumble it
         self.lat_acc = 35.0           # lateral slew (reversals are the tumble risk)
         self.airmode = True           # torque-priority mixing; see _mix below
+        self.yaw_desat = True         # ...with yaw scaled down first, so a yaw demand never adds lift
         self.b3_rate = np.deg2rad(10000.0) # attitude-target slewing destabilises it
         self.recovering = False
         self.b3_prev = None
@@ -128,6 +129,21 @@ class Pilot:
         f_lift = np.full(4, thrust / 4.0)
         f_tau = self.mix_inv @ np.array([0.0, tau[0], tau[1], tau[2]])
         f = f_lift + f_tau
+        if self.airmode and self.yaw_desat:
+            # Yaw has the least authority on a quad, so a hard yaw demand at low collective (a commanded
+            # descent sets az to 0.35 G) drives motors negative, and the collective shift below then turns
+            # it into lift: a Laya-steered drone swinging its heading climbed to 6-12 m against a descent
+            # command. Give yaw the lowest priority: keep roll/pitch whole, scale the yaw torque down to what
+            # fits between 0 and f_max, and only then shift the collective for roll/pitch.
+            f0 = f_lift + self.mix_inv @ np.array([0.0, tau[0], tau[1], 0.0])
+            f_y = self.mix_inv @ np.array([0.0, 0.0, 0.0, tau[2]])
+            k = 1.0
+            for fi, yi in zip(f0, f_y):
+                if yi < 0.0:
+                    k = min(k, max(fi, 0.0) / -yi)
+                elif yi > 0.0:
+                    k = min(k, max(self.f_max - fi, 0.0) / yi)
+            f = f0 + max(k, 0.0) * f_y
         if self.airmode:
             # Torque priority ("airmode"): shift the collective so the torque the
             # attitude loop asked for survives. Starving torque to protect thrust is

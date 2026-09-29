@@ -747,6 +747,11 @@ def episode(seed=0, seconds=35.0, use_jev=True, video=None, hz=None, budget=None
                            **({"reappear": None if rp is None else {k: rp.get(k) for k in (
                                "side", "t", "true_side", "occluded", "eta_s")}} if reacq is not None else {}),
                            "code_range_m": scene["target"]["range_m"],
+                           # the altitude operator (altitude.py): altitude, setpoint, the latest answer and
+                           # the course's target (what the answer should have moved toward)
+                           **({"alt": {"z": float(pos[2]), "sp": alt_now,
+                                       "dz": altim.dzs[-1] if altim.dzs else None,
+                                       "target": float(target_fn(d.qpos[:3]))}} if altim is not None else {}),
                            "guide": {"lost_for": float(getattr(guide, "lost_for", 0.0) or 0.0),
                                      "yaw_sp": None if guide.yaw_sp is None else float(guide.yaw_sp),
                                      # which lost-target branch Guidance could take this step, mirroring its

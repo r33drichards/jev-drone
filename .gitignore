@@ -27,3 +27,8 @@ mujoco_menagerie/
 
 # downloaded real-world assets (Poly Haven, scanned objects, OSM); fetched on demand, not committed
 realism_assets/cache/
+
+# large flight GIFs (published in the Laya Flight Reel artifact instead)
+docs/gifs/v3.3/
+docs/gifs/laya-full-v3.3-*
+docs/gifs/hybrid-v2pursuit-alt-*

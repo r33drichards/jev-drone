@@ -165,6 +165,8 @@ CONFIGS = {
     # the altitude operator answered by a checkpoint trained on drone_rover_alt (--model): code pursuit to
     # isolate it; and all Laya: v2 pursuit, --model reacquires and flies altitude. Tactics hold_course (the
     # oracle's only other answer is climb, which the altitude operator replaces)
+    # v3.3 alone, every decision: its own pursuit (v3.2a's fitted read-out), reacquisition and altitude
+    "laya-full-v3.3": (True, "const:hold_course", False, False, dict(_V32_PURSUIT, reacquire="laya", altitude="laya")),
     "laya-alt": (True, "const:hold_course", False, False, {"pursuit": "code", "altitude": "laya"}),
     "hybrid-v2pursuit-alt": (True, "const:hold_course", False, False,
                              {"pursuit": "laya-pursuit", "pursuit_questions": "v2", "reacquire": "laya",
@@ -265,9 +267,14 @@ def fly_gif(config: str, seed: int, seconds: float, course: str, budget: int = 0
     import numpy as np
     use_model, backend, img, lockstep, pk = _config(config)
     rec = []
+    pk = dict(pk)
+    pm = pk.pop("pursuit_model", None)            # as fly(): --model then serves reacquire and altitude
+    extra = {"reacquire_model": model or None} if pm and pk.get("reacquire") == "laya" else {}
+    if pm and pk.get("altitude") == "laya":
+        extra["altitude_model"] = model or None
     r = run.episode(seed, seconds, use_jev=use_model, backend=backend, laya_model=model or None,
                     laya_image=img, lockstep=lockstep, course=course, budget=budget or None, record=rec,
-                    pursuit_model=model or None, **pk)
+                    pursuit_model=pm or model or None, **extra, **pk)
     r.update(config=config)
     outcome = "finished" if r["finished_at_s"] is not None else "stopped at x=%.0f m" % r["max_x_m"]
     title = "%s  |  %s seed %d  |  %s" % (config, course, seed, outcome)
@@ -283,11 +290,18 @@ def fly_gif(config: str, seed: int, seconds: float, course: str, budget: int = 0
                       "yaw_deg": round(float(np.rad2deg(s["yaw"])), 1),
                       "rover": [round(float(v), 2) for v in s["mocap_pos"][rid][:2]],
                       **{k: s.get(k) for k in ("target_visible", "loc", "true_bearing_deg", "code_bearing_deg",
-                                               "code_range_m", "guide", "reflex", "climbing", "hits")},
+                                               "code_range_m", "guide", "reflex", "climbing", "hits",
+                                               "alt", "reappear")},
                       "maneuver": s["judg"].get("maneuver")})
     label = "tactics (oracle)" if backend == "const:oracle" else "tactics (%s)" % (
         backend if use_model else "none")
-    return (r, flightgif.make_gif(rec, course, seed, title, "/root/jev", tactics_label=label),
+    if backend == "const:hold_course" and pk.get("altitude"):
+        label = None                 # no tactical layer: altitude.py replaces the only other answer (climb)
+    short = lambda p: (p or "").replace("/ckpt/smolvlm/drone-rover-", "Laya ").replace("/best", "").replace("/last", "")  # noqa: E731
+    who = {"pursuit": short(pm or model) if pk.get("pursuit", "code") != "code" else "code",
+           "reacquire": short(model) if pk.get("reacquire") == "laya" else None,
+           "altitude": short(model) if pk.get("altitude") == "laya" else pk.get("altitude")}
+    return (r, flightgif.make_gif(rec, course, seed, title, "/root/jev", tactics_label=label, who=who),
             json.dumps(track, default=float))
 
 
@@ -687,7 +701,11 @@ def gifs(config: str = "laya-image", courses: str = "pockets,mixed", seeds: str 
     d = os.path.join(HERE, "docs", "gifs")
     os.makedirs(d, exist_ok=True)
     jobs = [(k, int(s)) for k in courses.split(",") for s in seeds.split(",")]
-    calls = [fly_gif.spawn(config, s, seconds, k, budget, model) for k, s in jobs]
+    # --seconds 0: each course's own length (tactics 110 s, town 120 s, city 225 s, else 90 s), with the call
+    # budget scaled to it (240 per 90 s)
+    secs = {k: seconds or {"tactics": 110.0, "town": 120.0, "city": 225.0}.get(k.split("@")[0], 90.0) for k, _ in jobs}
+    calls = [fly_gif.spawn(config, s, secs[k], k, budget if seconds else int(240 * secs[k] / 90), model)
+             for k, s in jobs]
     out = _outdir()
     for (k, s), fc in zip(jobs, calls):
         res = _get(fc)

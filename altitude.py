@@ -64,12 +64,24 @@ def read(probs, sharpen=1.0):
     return float(np.dot(p / max(p.sum(), 1e-12), ALT_LEVELS))
 
 
+DEADBAND_M = 0.2        # an answer this close to zero keeps the setpoint
+
+
 def next_setpoint(sp, z, dz):
     """Where one answer moves the setpoint: toward z + dz (the answer is relative to the altitude the frame
-    was taken at, so a setpoint the aircraft is still catching up to does not run away), at most MAX_STEP_M
-    from the current setpoint, inside [ALT_MIN, ALT_MAX]."""
+    was taken at), at most MAX_STEP_M, inside [ALT_MIN, ALT_MAX] -- and only in the answer's direction. A
+    descend answer never raises the setpoint: re-anchoring on z alone let an aircraft pushed upward by
+    something else (flight.Pilot's airmode lift in hard yaw) drag the setpoint up with it while every answer
+    said descend (v3.3 GIF flights, no-climb seed 1: setpoint 1.6 -> 3.2 m in 1.4 s of descend answers).
+    |dz| < DEADBAND_M keeps the setpoint (no re-anchoring jitter at hold)."""
+    if abs(dz) < DEADBAND_M:
+        return float(sp)
     want = z + dz
-    return float(np.clip(np.clip(want, sp - MAX_STEP_M, sp + MAX_STEP_M), ALT_MIN, ALT_MAX))
+    if dz > 0:
+        new = max(sp, min(want, sp + MAX_STEP_M))
+    else:
+        new = min(sp, max(want, sp - MAX_STEP_M))
+    return float(np.clip(new, ALT_MIN, ALT_MAX))
 
 
 class SimAltitude:

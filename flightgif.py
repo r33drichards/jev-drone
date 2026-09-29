@@ -10,8 +10,21 @@ import numpy as np
 from PIL import Image, ImageDraw
 
 CHASE_W, CHASE_H = 480, 360
-PANEL_W = 256
+PANEL_W = 360
+LINE_H = 17
+TOP_H = max(CHASE_H, PANEL_W * 3 // 4 + 8 + LINE_H * 14)   # chase view | camera + 14 text lines
 TAN_H = float(np.tan(np.deg2rad(55.0)) * 96 / 72)   # probe.TAN_H: the onboard camera's half-width
+
+
+LEGEND = [
+    ("How to read this", (255, 255, 255)),
+    ("camera: green tick = where the rover truly is,", (90, 255, 90)),
+    ("        yellow tick = where Laya says it is", (255, 220, 60)),
+    ("red border = Laya's 'visible?' answer is wrong", (255, 80, 80)),
+    ("red text = an answer far from the right one", (255, 110, 90)),
+    ("REFLEX = code's collision override (< 2.2 m)", (255, 150, 110)),
+    ("map: blue line = drone path, blue dot = drone", (80, 200, 255)),
+]
 
 
 def _font():
@@ -45,11 +58,14 @@ def _laya_line(loc, truly, tb, disagree):
 
 
 def make_gif(record, course, seed, title, directory=".", every=2, frame_ms=100, trim_after_s=8.0,
-             tactics_label="tactics"):
+             tactics_label="tactics", who=None):
     """`every`: keep one snapshot in `every` (snapshots are 0.2 s apart, so every=2 at 100 ms
     per frame plays at 4x). Stops `trim_after_s` after the aircraft last made progress.
     `tactics_label` names who gave the tactical answer (e.g. "tactics (oracle)"): with the oracle
-    as the tactical backend, a bare "answer: hold_course" read as if Laya had said it."""
+    as the tactical backend, a bare "answer: hold_course" read as if Laya had said it; None: no tactical
+    lines (no tactical layer flies). `who`: {"pursuit", "reacquire", "altitude"} -> which checkpoint (or
+    "code") makes that decision, shown on the panel's lines."""
+    who = who or {}
     import mujoco
     import courses
     c = courses.make(course, seed)
@@ -82,6 +98,7 @@ def make_gif(record, course, seed, title, directory=".", every=2, frame_ms=100, 
         end = len(record)               # at one frame in 3 (6x), or a 120 s lap is a ~13 MB GIF
         every = max(every, 3)
 
+    every = max(every, -(-end // 250))  # at most ~250 frames (a 225 s city lap would be ~30 MB)
     font = _font()
     frames = []
     trail = []
@@ -99,7 +116,7 @@ def make_gif(record, course, seed, title, directory=".", every=2, frame_ms=100, 
         r.update_scene(d, cam)
         chase = Image.fromarray(r.render())
 
-        canvas = Image.new("RGB", (map_w, CHASE_H + map_h), (18, 20, 24))
+        canvas = Image.new("RGB", (map_w, TOP_H + map_h), (18, 20, 24))
         canvas.paste(chase, (0, 0))
         dr = ImageDraw.Draw(canvas)
         loc = snap.get("loc")
@@ -153,18 +170,44 @@ def make_gif(record, course, seed, title, directory=".", every=2, frame_ms=100, 
                 cr = snap.get("code_range_m")
                 lines.append(("Laya speed: rover %.1f m%s" % (loc["range_m"], " (code %.1f)" % cr if cr else ""),
                               (255, 220, 60)))
+        if tactics_label is None:
+            lines = [lines[0]] + lines[4:]
+        if who.get("pursuit"):
+            lines.insert(1, ("steer + speed: %s" % who["pursuit"], (160, 200, 255)))
+        rp = snap.get("reappear")
+        g = snap.get("guide") or {}
+        if who.get("reacquire") and (g.get("lost_for") or 0) > 1.0:
+            if rp and rp.get("side"):
+                ok = rp.get("true_side") in (None, rp["side"])
+                lines.append(("reacquire (%s): reappears %s%s" % (
+                    who["reacquire"], rp["side"].upper(), "" if rp.get("true_side") is None
+                    else "  (true: %s)" % rp["true_side"]), (140, 230, 140) if ok else (255, 110, 90)))
+            else:
+                lines.append(("reacquire (%s): waiting" % who["reacquire"], (170, 170, 170)))
+        a = snap.get("alt")
+        if a:
+            dz = a.get("dz")
+            want = a["target"] - a["z"]
+            txt = "altitude (%s): %s" % (who.get("altitude") or "?", "-" if dz is None else "%+.1f m" % dz)
+            txt += "  (ideal %+.1f)" % max(-1.0, min(1.0, want))
+            bad = dz is not None and abs(dz - max(-1.0, min(1.0, want))) > 0.4
+            lines.append((txt, (255, 110, 90) if bad else (120, 220, 255)))
+            lines.append(("  height %.2f m -> setpoint %.2f m (course wants %.1f)" % (a["z"], a["sp"] or 0, a["target"]),
+                          (200, 200, 200)))
         for n, (txt, col) in enumerate(lines):
             if txt:
-                dr.text((CHASE_W + 8, y0 + 18 * n), txt, fill=col, font=font)
+                dr.text((CHASE_W + 8, y0 + LINE_H * n), txt, fill=col, font=font)
+        for n, (txt, col) in enumerate(LEGEND):          # under the chase view: how to read the panel
+            dr.text((8, CHASE_H + 8 + LINE_H * n), txt, fill=col, font=font)
         dr.rectangle([0, 0, CHASE_W - 1, 22], fill=(0, 0, 0))
         dr.text((6, 4), title, fill=(255, 255, 255), font=font)
 
-        canvas.paste(mp, (0, CHASE_H))
+        canvas.paste(mp, (0, TOP_H))
         pts = [to_map(x, y) for x, y in trail[: k + 1]]
         if len(pts) > 1:
-            dr.line([(u, CHASE_H + v) for u, v in pts], fill=(80, 200, 255), width=2)
+            dr.line([(u, TOP_H + v) for u, v in pts], fill=(80, 200, 255), width=2)
         u, v = to_map(*snap["qpos"][:2])
-        dr.ellipse([u - 5, CHASE_H + v - 5, u + 5, CHASE_H + v + 5], fill=(80, 200, 255), outline=(255, 255, 255))
+        dr.ellipse([u - 5, TOP_H + v - 5, u + 5, TOP_H + v + 5], fill=(80, 200, 255), outline=(255, 255, 255))
         frames.append(canvas.convert("P", palette=Image.ADAPTIVE, colors=128))
 
     buf = io.BytesIO()
