@@ -558,6 +558,7 @@ ROVER_SET_TAC = ROVER_SET + "_tac"
 ROVER_SET_TOWN = ROVER_SET + "_town"
 ROVER_SET_ALT = ROVER_SET + "_alt"       # altitude.py's ascend / descend operator
 ROVER_SET_ONP = ROVER_SET + "_onpolicy"  # frames from the checkpoint's own real-time flights (DAgger)
+ROVER_SET_TOWN_X4 = ROVER_SET + "_town_x4"  # town-x4 (rover 4x faster): perception / reacquisition views
 
 
 @app.function(gpu=["L4", "A10G"], cpu=4, memory=16384, timeout=30 * 60,
@@ -629,13 +630,14 @@ def collect_tac_job(course: str, seed: int, split: str):
 
 
 @app.function(cpu=2, memory=8192, timeout=60 * 60, volumes={"/data": data_vol})
-def collect_town_job(seed: int, kind: str, split: str, seconds: float = 0.0):
+def collect_town_job(seed: int, kind: str, split: str, seconds: float = 0.0, course: str = "town",
+                     set_name: str = ""):
     """One town flight (code pursuit or a rover_data.TOWN_FAILURE stand-in) -> its views' images and records
-    (rover_data.collect_flight_town / records_town)."""
+    (rover_data.collect_flight_town / records_town). `course`: "town-x4" etc.; `set_name`: the dataset."""
     _enter()
     import rover_data
-    frames = rover_data.collect_flight_town(seed, kind, seconds or None)
-    recs = rover_data.records_town(frames, "/data/vqa/%s/images" % ROVER_SET_TOWN)
+    frames = rover_data.collect_flight_town(seed, kind, seconds or None, course=course)
+    recs = rover_data.records_town(frames, "/data/vqa/%s/images" % (set_name or ROVER_SET_TOWN))
     data_vol.commit()
     return json.dumps([dict(r, split=split) for r in recs], default=float)
 
@@ -1044,6 +1046,25 @@ def build_rover_set_onpolicy(config: str = "laya-full-v3.3", model: str = "/ckpt
         "source": "jev-drone rover_data.collect_flight_onpolicy / records_onpolicy / balance_onpolicy",
         "config": config, "model": model, "train": train, "val": val, "timing": "virtual"})
     print("wrote /data/vqa/%s:" % ROVER_SET_ONP, counts)
+    print(json.dumps(report, indent=1))
+
+
+@app.local_entrypoint()
+def build_rover_set_town_x4(train_seeds: str = ",".join(str(s) for s in range(10, 30)), val_seeds: str = "30,31",
+                            course: str = "town-x4"):
+    """Write /data/vqa/drone_rover_town_x4 (create-only): data-collection flights on the fast town (the scripted
+    pursuit flies; Laya is not in the loop) with rotated views, labelled as drone_rover_town
+    (rover_data.collect_flight_town / records_town). Evaluation uses town seeds 0-9."""
+    if rover_set_ready.remote(ROVER_SET_TOWN_X4):
+        raise SystemExit("/data/vqa/%s already exists; refusing to overwrite" % ROVER_SET_TOWN_X4)
+    jobs = [(int(s), "code", sp, 0.0, course, ROVER_SET_TOWN_X4) for sp, seeds in (("train", train_seeds), ("val", val_seeds))
+            for s in seeds.split(",") if s]
+    assert not any(s in TAC_HELD_OUT["town"] for s, *_ in jobs), "town seeds 0-9 are held out"
+    out = _collect_all(collect_town_job, jobs)
+    counts, report = finalize_rover_set_v32.remote(ROVER_SET_TOWN_X4, out, {
+        "source": "jev-drone rover_data.collect_flight_town / records_town", "course": course,
+        "train_seeds": train_seeds, "val_seeds": val_seeds})
+    print("wrote /data/vqa/%s:" % ROVER_SET_TOWN_X4, counts)
     print(json.dumps(report, indent=1))
 
 
