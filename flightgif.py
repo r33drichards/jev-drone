@@ -58,13 +58,18 @@ def _laya_line(loc, truly, tb, disagree):
 
 
 def make_gif(record, course, seed, title, directory=".", every=2, frame_ms=100, trim_after_s=8.0,
-             tactics_label="tactics", who=None):
+             tactics_label="tactics", who=None, realtime=False, rt_every=1, scale=1.0, colors=128,
+             fmt="gif", snap_dt=0.2):
     """`every`: keep one snapshot in `every` (snapshots are 0.2 s apart, so every=2 at 100 ms
     per frame plays at 4x). Stops `trim_after_s` after the aircraft last made progress.
     `tactics_label` names who gave the tactical answer (e.g. "tactics (oracle)"): with the oracle
     as the tactical backend, a bare "answer: hold_course" read as if Laya had said it; None: no tactical
     lines (no tactical layer flies). `who`: {"pursuit", "reacquire", "altitude"} -> which checkpoint (or
-    "code") makes that decision, shown on the panel's lines."""
+    "code") makes that decision, shown on the panel's lines. `realtime`: play at 1x: one frame per `rt_every`
+    snapshots (0.2 s apart), each shown 0.2 s x rt_every, no frame cap, so the GIF lasts as long as the flight
+    (a stuck ending is still trimmed). `scale` / `colors` shrink each frame. `fmt="mp4"`: an H.264 video instead
+    (full colour; with `realtime`, at the snapshot rate, 1 / snap_dt frames per second). `snap_dt`: the
+    record's snapshot interval (run.episode record_every x 2 ms)."""
     who = who or {}
     import mujoco
     import courses
@@ -93,12 +98,15 @@ def make_gif(record, course, seed, title, directory=".", every=2, frame_ms=100, 
     for k, x in enumerate(xs):
         if x > best + 0.5:
             best, last_gain = x, k
-    end = min(len(record), last_gain + int(trim_after_s / 0.2) + 1)
+    end = min(len(record), last_gain + int(trim_after_s / snap_dt) + 1)
     if getattr(c, "looped", False):     # a loop makes no x progress to trim on: keep the whole flight,
         end = len(record)               # at one frame in 3 (6x), or a 120 s lap is a ~13 MB GIF
         every = max(every, 3)
 
     every = max(every, -(-end // 250))  # at most ~250 frames (a 225 s city lap would be ~30 MB)
+    if realtime:                        # 1x playback (see the docstring): every snapshot, or every rt_every-th
+        every = max(1, int(rt_every))
+        frame_ms = int(round(1000 * snap_dt * every))
     font = _font()
     frames = []
     trail = []
@@ -208,8 +216,26 @@ def make_gif(record, course, seed, title, directory=".", every=2, frame_ms=100, 
             dr.line([(u, TOP_H + v) for u, v in pts], fill=(80, 200, 255), width=2)
         u, v = to_map(*snap["qpos"][:2])
         dr.ellipse([u - 5, TOP_H + v - 5, u + 5, TOP_H + v + 5], fill=(80, 200, 255), outline=(255, 255, 255))
-        frames.append(canvas.convert("P", palette=Image.ADAPTIVE, colors=128))
+        if scale != 1.0:
+            canvas = canvas.resize((int(canvas.width * scale), int(canvas.height * scale)), Image.LANCZOS)
+        if fmt == "mp4":
+            frames.append(np.asarray(canvas))
+        else:
+            frames.append(canvas.convert("P", palette=Image.ADAPTIVE, colors=int(colors)))
 
+    if fmt == "mp4":
+        import imageio.v2 as imageio, tempfile, os
+        h, w = frames[0].shape[:2]
+        h2, w2 = h - h % 2, w - w % 2          # yuv420p needs even sides
+        path = tempfile.mktemp(suffix=".mp4")
+        wr = imageio.get_writer(path, fps=1000.0 / frame_ms, codec="libx264", quality=7,
+                                macro_block_size=1, ffmpeg_params=["-pix_fmt", "yuv420p", "-movflags", "+faststart"])
+        for f in frames:
+            wr.append_data(f[:h2, :w2])
+        wr.close()
+        data = open(path, "rb").read()
+        os.remove(path)
+        return data
     buf = io.BytesIO()
     frames[0].save(buf, "GIF", save_all=True, append_images=frames[1:], duration=frame_ms, loop=0, optimize=True)
     return buf.getvalue()
