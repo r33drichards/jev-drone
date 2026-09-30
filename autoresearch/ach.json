@@ -281,10 +281,11 @@
    "id": "X4",
    "status": "running",
    "cost": "CPU + small analysis",
-   "what": "Observability check: from recorded teacher decisions, how well do observation-only features (rover bearing and range in the frame, lidar, speed) predict the teacher's chosen turn and speed, vs privileged features (rover future position)? Fit a small model on each feature set and compare accuracy.",
+   "what": "Observability check: teacher flights (six 4x courses x seeds 20-23) log per decision the TRUE observable features (rover visible, bearing, range, speed, travel, altitude, lidar), the same plus the two previous decisions' observations (memory), and the same plus privileged ones (the rover 1-3 s ahead in the drone's frame, its velocity); softmax regression and kNN predict the teacher's turn / speed / slide level, held out by seed (autoresearch/x4_fit.py).",
    "predictions": {
-    "H5": "privileged features predict far better than observable ones",
-    "H1": "observable-feature model (with TRUE bearing) predicts well: the gap is Laya's perception",
+    "H5": "obs+priv predicts the turn far better than obs (the choice needs the future); memory helps only partly",
+    "H1": "true obs already predicts the turn well above Laya's image-only 35% (so the information is in the observation and Laya's perception is what falls short)",
+    "H4": "as H1 (the signal is there; more training should find it)",
     "others": "n/a"
    },
    "diagnostic_for": [
