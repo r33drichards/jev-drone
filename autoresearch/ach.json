@@ -48,7 +48,8 @@
     "H8": "C",
     "H9": "C",
     "H10": "N"
-   }
+   },
+   "note": "[E16: rover-in-view here counts time after collisions; re-scored in X11]"
   },
   {
    "id": "E3",
@@ -67,7 +68,7 @@
     "H9": "C",
     "H10": "N"
    },
-   "note": "Errors already present before any drift: against covariate shift as the ROOT cause (it can still compound them)."
+   "note": "Errors already present before any drift: against covariate shift as the ROOT cause (it can still compound them). [E16: rover-in-view here counts time after collisions; re-scored in X11]"
   },
   {
    "id": "E4",
@@ -85,7 +86,8 @@
     "H8": "C",
     "H9": "CC",
     "H10": "N"
-   }
+   },
+   "note": "[E16: rover-in-view here counts time after collisions; re-scored in X11]"
   },
   {
    "id": "E5",
@@ -123,7 +125,7 @@
     "H9": "C",
     "H10": "N"
    },
-   "note": "Weak: sparse, noisy RL failing is consistent with most hypotheses; it fits a cause no amount of training on these inputs removes."
+   "note": "Weak: sparse, noisy RL failing is consistent with most hypotheses; it fits a cause no amount of training on these inputs removes. [E16: rover-in-view here counts time after collisions; re-scored in X11]"
   },
   {
    "id": "E7",
@@ -199,7 +201,7 @@
     "H9": "C",
     "H10": "N"
    },
-   "note": "Removing the shortcut helps after the start (H9 is a real contributor, as predicted) but is not a fix; without the crutch the early steering is worse: the image-only skill is weak (H1 or H4). H5 predicted no flight gain: mildly against."
+   "note": "Removing the shortcut helps after the start (H9 is a real contributor, as predicted) but is not a fix; without the crutch the early steering is worse: the image-only skill is weak (H1 or H4). H5 predicted no flight gain: mildly against. [E16: rover-in-view here counts time after collisions; re-scored in X11]"
   },
   {
    "id": "E11",
@@ -237,7 +239,7 @@
     "H9": "CC",
     "H10": "N"
    },
-   "note": "With the shortcut made unreliable the image-only skill jumps (turn 35% -> 48%) and flights improve most after the start: the shortcut was starving image learning (H9). That the image-only skill can rise this much with the same frames argues against H5 (the frame lacks the information) and against a hard perception ceiling (H1); what remains (23% in view late, 16 hits) fits compounding drift (H3) and more training (H4)."
+   "note": "With the shortcut made unreliable the image-only skill jumps (turn 35% -> 48%) and flights improve most after the start: the shortcut was starving image learning (H9). That the image-only skill can rise this much with the same frames argues against H5 (the frame lacks the information) and against a hard perception ceiling (H1); what remains (23% in view late, 16 hits) fits compounding drift (H3) and more training (H4). [E16: rover-in-view here counts time after collisions; re-scored in X11]"
   },
   {
    "id": "E13",
@@ -275,7 +277,7 @@
     "H9": "N",
     "H10": "C"
    },
-   "note": "Under-training predicted a clear rise; held-out and image-only numbers (1000+ decisions) fell: against H4. More passes over the same teacher states hurt (overfitting shows up beyond one budget, H10) and do not reach the states the student drifts into (H3). The 6-flight diagnostic alone is noisy; the held-out drop carries the weight."
+   "note": "Under-training predicted a clear rise; held-out and image-only numbers (1000+ decisions) fell: against H4. More passes over the same teacher states hurt (overfitting shows up beyond one budget, H10) and do not reach the states the student drifts into (H3). The 6-flight diagnostic alone is noisy; the held-out drop carries the weight. [E16: rover-in-view here counts time after collisions; re-scored in X11]"
   },
   {
    "id": "E15",
@@ -295,12 +297,47 @@
     "H10": "N"
    },
    "note": "Not diagnostic between hypotheses, but it lowers the weight of single-flight results: GPU inference noise is amplified by the flight dynamics, so a 6-flight diagnostic has wide error bars. Comparisons between models should rest on the held-out / probe numbers (1000+ decisions) and on many flights (the RL collections: 90-120 flights each)."
+  },
+  {
+   "id": "E16",
+   "text": "The human watched the five 'best' model flights: all crash; the top one (rl2 town-x4) clipped into a building and stayed stuck. 'Rover in view %' kept counting after collisions (a drone wedged in a wall with the rover in sight scores), and the RL reward had the same flaw (+1 in view per decision, only -3 per collision, flight continues).",
+   "source": "human review of results/gifs-best/20260930-221157; teacher.rl_fly and teacher.diagnose before commit fixing them",
+   "credibility": "high",
+   "ratings": {
+    "H1": "N",
+    "H2": "N",
+    "H3": "N",
+    "H4": "N",
+    "H5": "N",
+    "H6": "N",
+    "H7": "N",
+    "H8": "N",
+    "H9": "N",
+    "H10": "N"
+   },
+   "note": "A measurement flaw, not evidence between hypotheses: every flight-level comparison so far (E2-E4, E10, E12, E14, the RL collections) used the contaminated metric. The held-out and probe numbers (E5, E9, E13) are unaffected. From here the yardstick is clean tracking (rover in view before the first collision) and first-collision time; RL rollouts end at the first collision. v3.6-v3.9 are being re-scored on 20 flights each (X11)."
   }
  ],
  "experiments": [
   {
-   "id": "X10",
+   "id": "X11",
    "status": "running",
+   "cost": "80 GPU flights (~2 GPU-hours)",
+   "kind": "measurement",
+   "what": "Re-score v3.6, v3.7-noprev, v3.8-prevdrop, v3.9 by clean tracking (seconds with the rover in view before the first collision), first-collision time and collision-free flights: 5 courses x seeds 0-3, 30 s (student_eval).",
+   "predictions": {
+    "H9": "the no-crutch students (v3.7, v3.8) still beat v3.6 on clean tracking",
+    "H4/H10": "v3.9 no better than v3.8",
+    "others": "n/a"
+   },
+   "diagnostic_for": [
+    "H9",
+    "H10"
+   ]
+  },
+  {
+   "id": "X10",
+   "status": "paused",
    "cost": "per iteration: 120 GPU rollouts (~3 GPU-hours) + ~0.5 A100-hour",
    "kind": "test + intervention (H3 vs H4), approved by the human",
    "what": "Outcome-reward RL (teacher.rl_fly rewards, group-relative advantages) from the better of v3.8-prevdrop / v3.9 (by the X9 diagnostic): 5 courses x seeds 110-111 x groups of 12, groups whose returns differ by less than 2.0 (std) left out, anchor data drone_rover_teacher_sharp_prevdrop; up to 4 iterations. The RL rows carry the student's own previous command, so they are copycat-safe.",
@@ -314,7 +351,8 @@
     "H3",
     "H4"
    ],
-   "base": "drone-rover-v3.8-prevdrop/best"
+   "base": "drone-rover-v3.8-prevdrop/best",
+   "note": "Iteration 1 collected (v3.8, 120 flights) under the flawed reward; stopped before training finished (E16). Restart with the collision-terminated reward from the best model by clean tracking (X11)."
   },
   {
    "id": "X9",
@@ -478,7 +516,7 @@
  ],
  "conclusions": {
   "ranking": "see ach.py show",
-  "summary": "Causal confusion (H9) is the best-supported cause and its fix (previous-command dropout, v3.8) is the best student so far (rover in view 41%). Under-training (H4) is now disconfirmed: more passes over the same teacher data made v3.8 worse (X9), which also shows overfitting beyond one budget (H10). Missing information (H5), a perception ceiling (H1), control (H2), latency (H6) and a pipeline bug (H8) are rejected or strongly weakened. What remains is late drift into states the teacher never visited (H3): X10, outcome-reward RL on the student's own flights from v3.8, tests and targets it.",
+  "summary": "Measurement correction (E16): the flight metric counted time after collisions and the RL reward paid for a view from a wall; both are fixed (clean tracking; rollouts end at the first collision) and X10 is paused. Held-out/probe evidence stands: causal confusion (H9) is the best-supported cause, missing information (H5) and a perception ceiling (H1) are strongly weakened, under-training (H4) is disconfirmed. X11 re-scores the students on 20 flights each with the clean metric before RL resumes.",
   "milestones": [
    "X4: if true observables predict the teacher's turn well, H5 is rejected and the gap is learnable",
    "X5 (DAgger from v3.8, with previous-command dropout kept) vs a longer v3.8 run: whichever raises late rover-in-view decides H3 vs H4",

@@ -12,7 +12,12 @@ six 4x courses (70/72; 36/36 even when it holds its heading between decisions as
 by command (`policy="laya-cmd"`, v3.5 soft targets, v3.6 sharp targets, rl1-rl4 outcome-reward RL) finishes none
 (0/30, 0/31), keeps the rover in view 10-20% of the time and collides 2-3 times a flight. **What is the cause, and
 what fixes it?** Success = a Laya checkpoint that, flying itself (`laya-cmd-wc`, wall clock), finishes a majority
-of 4x flights, measured on seeds it never trained on.
+of 4x flights **without a collision**, measured on seeds it never trained on.
+
+**Yardstick.** Flight comparisons use clean tracking: seconds with the rover in view BEFORE the first collision,
+the first-collision time, and collision-free flights, over at least 20 flights per model (`student_eval`). Never
+"rover in view" over the whole flight: a drone wedged in a wall with the rover in sight scores on it (E16). Single
+flights vary a lot between re-flights (E15); do not rank models on a handful.
 
 ## ACH, as this loop runs it
 
