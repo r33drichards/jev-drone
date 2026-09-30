@@ -242,6 +242,24 @@
  ],
  "experiments": [
   {
+   "id": "X9",
+   "status": "running",
+   "cost": "1 A100-hour training + 7 GPU jobs",
+   "kind": "test (H4 vs H3)",
+   "what": "Continue v3.8-prevdrop for another run of the same length on the same data (drone-rover-v3.9-prevdrop-cont, init v3.8-prevdrop/best), then the copycat probe and the diagnostic.",
+   "predictions": {
+    "H4": "held-out top-1 and image-only top-1 rise further; rover in view after 8 s clearly above v3.8's 23%",
+    "H3": "held-out numbers may rise, but late-flight rover in view stays near 23% (the states it drifts to are still missing from the data)",
+    "H10": "held-out numbers fall or flat while train numbers rise",
+    "others": "no systematic change"
+   },
+   "diagnostic_for": [
+    "H4",
+    "H3",
+    "H10"
+   ]
+  },
+  {
    "id": "X8",
    "status": "done",
    "cost": "CPU dataset + 1 A100-hour training + 6 GPU diagnostic flights",
