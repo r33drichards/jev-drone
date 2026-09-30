@@ -219,12 +219,31 @@
     "H10": "I"
    },
    "note": "Small generalisation gap: not memorisation. The failure is a shortcut that holds in train and validation alike."
+  },
+  {
+   "id": "E12",
+   "text": "X8 intervention: v3.8 trained with the previous command zeroed in half the decisions. Copycat probe: turn top-1 54.7% recorded / 41.3% foreign / 48.2% zeroed (v3.6: 56.5 / 35.8 / 35.0), speed 66.2 / 52.5 / 61.5; the answer's correlation with a foreign previous command 0.42 (v3.6 0.56). Diagnostic: rover in view 41% (v3.6 21%, v3.7 33%); 3-8 s in view 64% with heading error 29 deg (v3.6 32% / 52, v3.7 39% / 46); 8-25 s in view 23%; 16 hits; none of the 6 flights kept the rover all the way.",
+   "source": "autoresearch/runs/X8.md; X6-drone-rover-v3.8-prevdrop.json; results/teacher-diag/20260930-204106",
+   "credibility": "high",
+   "ratings": {
+    "H1": "I",
+    "H2": "N",
+    "H3": "C",
+    "H4": "C",
+    "H5": "I",
+    "H6": "N",
+    "H7": "N",
+    "H8": "N",
+    "H9": "CC",
+    "H10": "N"
+   },
+   "note": "With the shortcut made unreliable the image-only skill jumps (turn 35% -> 48%) and flights improve most after the start: the shortcut was starving image learning (H9). That the image-only skill can rise this much with the same frames argues against H5 (the frame lacks the information) and against a hard perception ceiling (H1); what remains (23% in view late, 16 hits) fits compounding drift (H3) and more training (H4)."
   }
  ],
  "experiments": [
   {
    "id": "X8",
-   "status": "running",
+   "status": "done",
    "cost": "CPU dataset + 1 A100-hour training + 6 GPU diagnostic flights",
    "kind": "intervention (H9)",
    "what": "Keep the previous command but drop it out: retrain from v3.4/best on teacher_sharp where each record's prev_speed/prev_turn is replaced by 0/0 with probability 0.5 (ChauffeurNet's past-motion dropout; Wen et al. 2020), then the diagnostic WITH the previous command (the student's own) and the copycat probe.",
@@ -239,7 +258,8 @@
     "H1",
     "H5"
    ],
-   "run": "drone-rover-v3.8-prevdrop"
+   "run": "drone-rover-v3.8-prevdrop",
+   "result": "E12"
   },
   {
    "id": "X1",
@@ -362,10 +382,11 @@
  ],
  "conclusions": {
   "ranking": "see ach.py show",
-  "summary": "H9 (copycat through the previous command) is real: removing it (X7) raised rover-in-view after the start from 4% to 20% (8-25 s) and cut collisions, but the student's steering from the image alone is still weak (early heading error 31 deg). The open question is whether the image carries what the teacher decides on (H1 perception / H4 training) or not (H5 observability): X4 fits the teacher's choices from true observable vs privileged features.",
+  "summary": "Causal confusion (H9) is the best-supported cause: removing (X7) or dropping out (X8) the previous command raises the student's image-only skill (turn 35% -> 48%) and doubles rover-in-view (21% -> 41%), most after the start. The same frames supporting a much better image-only skill weakens H5 (missing information) and a hard perception limit (H1). Flights still fail later (23% in view after 8 s, ~2.7 hits a flight): next, split compounding drift (H3, DAgger on v3.8) from plain under-training (H4, same data, longer). X4 (observable vs privileged features) is still collecting.",
   "milestones": [
-   "X6: if the student's accuracy collapses with shuffled prev_* and its answers track it, retrain without prev_* (or with it dropped out) as the intervention",
-   "X3/X4 still split perception from observability"
+   "X4: if true observables predict the teacher's turn well, H5 is rejected and the gap is learnable",
+   "X5 (DAgger from v3.8, with previous-command dropout kept) vs a longer v3.8 run: whichever raises late rover-in-view decides H3 vs H4",
+   "Success milestone: a majority of 4x flights finished in wall clock (laya-cmd-wc)"
   ]
  }
 }
