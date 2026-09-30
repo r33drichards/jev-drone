@@ -2017,7 +2017,7 @@ def student_eval(models: str, courses: str = "town-x4,mixed-x4,pockets-x4,tactic
                  seeds: str = "0,1,2,3", seconds: float = 30.0):
     """Clean-tracking evaluation of several checkpoints ("path" or "path:noprev", comma-separated) on the same
     (course, seed) grid -> results/student-eval/<timestamp>/episodes.jsonl and a per-model summary."""
-    import numpy as np
+    mean = lambda v: sum(v) / max(len(v), 1)  # noqa: E731  (the local client has no numpy)
     specs = [(m.split(":")[0], m.endswith(":noprev")) for m in models.split(",")]
     jobs = [(m, c, int(s), npv) for m, npv in specs for c in courses.split(",") for s in seeds.split(",")]
     d = os.path.join(HERE, "results", "student-eval", time.strftime("%Y%m%d-%H%M%S"))
@@ -2036,6 +2036,6 @@ def student_eval(models: str, courses: str = "town-x4,mixed-x4,pockets-x4,tactic
     print("%-45s %6s %14s %14s %12s" % ("model", "flights", "clean view s", "first hit s", "no-hit flights"))
     for m, rs in by.items():
         fh = [r["first_hit_s"] if r["first_hit_s"] is not None else seconds for r in rs]
-        print("%-45s %6d %14.2f %14.2f %12d" % (m.split("smolvlm/")[-1], len(rs), np.mean([r["clean_view_s"] for r in rs]),
-                                                np.mean(fh), sum(r["collisions"] == 0 for r in rs)), flush=True)
+        print("%-45s %6d %14.2f %14.2f %12d" % (m.split("smolvlm/")[-1], len(rs), mean([r["clean_view_s"] for r in rs]),
+                                                mean(fh), sum(r["collisions"] == 0 for r in rs)), flush=True)
     print("wrote", d)
