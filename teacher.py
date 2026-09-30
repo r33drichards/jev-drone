@@ -235,9 +235,10 @@ def decide(w, t):
     return CANDIDATES[int(np.argmax(scores))], scores
 
 
-def _decoded(w, t, scores, temp):
+def _decoded(w, t, scores, temp, fixed=False):
     """What a student that learned the soft targets perfectly would fly: each question's probability-weighted
-    level (command.read) from command.soft_targets at `temp`, as a (speed, slide, rover-bearing offset) command."""
+    level (command.read) from command.soft_targets at `temp`, as a (speed, slide, rover-bearing offset) command;
+    `fixed`: as the student flies it, holding the decided heading (absolute) rather than tracking the rover."""
     import command
     pos, yaw = w.d.qpos[:3], _yaw(w.d.qpos[3:7])
     rv = w.c.rover_pose(t)
@@ -245,8 +246,9 @@ def _decoded(w, t, scores, temp):
     turns = [float(np.rad2deg(_wrap(to_rover + np.deg2rad(c[2]) - yaw))) for c in CANDIDATES]
     tg = command.soft_targets(CANDIDATES, scores, turns, temp)
     turn = np.deg2rad(command.read(tg["cmd_turn"], command.TURN_LEVELS))
-    return (command.read(tg["cmd_speed"], command.SPEED_LEVELS), command.read(tg["cmd_slide"], command.SLIDE_LEVELS),
-            float(np.rad2deg(_wrap(yaw + turn - to_rover))))
+    out = (command.read(tg["cmd_speed"], command.SPEED_LEVELS), command.read(tg["cmd_slide"], command.SLIDE_LEVELS),
+           float(np.rad2deg(_wrap(yaw + turn - to_rover))))
+    return out + (yaw + turn,) if fixed else out
 
 
 def diagnose(course, seed=0, seconds=35.0, model=None, alt=1.6):
@@ -314,7 +316,8 @@ def fly(course, seed=0, seconds=60.0, alt=1.6, path=True, record=False, decode="
     the onboard camera and lidar at every decision (flight.Eye) and return out["samples"]: per decision the JPEG
     frame, the command context (command.CMD_KEYS) and the soft targets (command.soft_targets). `decode`: "best"
     flies the best candidate; "soft:<temp>" flies what a perfect student of the soft targets at that temperature
-    would (_decoded), the check that the targets can carry the teacher's skill."""
+    would (_decoded), the check that the targets can carry the teacher's skill; "softfix:<temp>" and "bestfix"
+    hold the decided heading between decisions as the student does (no privileged rover tracking)."""
     w = World(course, seed)
     eye = None
     if record:
@@ -346,8 +349,13 @@ def fly(course, seed=0, seconds=60.0, alt=1.6, path=True, record=False, decode="
                 pos0, yaw0 = w.d.qpos[:3].copy(), _yaw(w.d.qpos[3:7])
                 scene = eye.look(w.d, pos0, yaw0, t)
             cmd, sc = decide(w, t)
-            if decode != "best":
-                cmd = _decoded(w, t, sc, float(decode.split(":")[1]))
+            if decode == "bestfix":         # the teacher's choice, heading held as the student holds it
+                rv = w.c.rover_pose(t)
+                p0 = w.d.qpos[:2]
+                cmd = tuple(cmd) + (float(np.arctan2(rv[1] - p0[1], rv[0] - p0[0])) + np.deg2rad(cmd[2]),)
+            elif decode != "best":          # "soft:<temp>" / "softfix:<temp>"
+                cmd = _decoded(w, t, sc, float(decode.split(":")[1]), fixed=decode.startswith("softfix"))
+            w._sp = None
             if eye is not None:
                 samples.append(_sample(w, eye, scene, pos0, yaw0, t, sc, prev, course, seed))
                 prev = (cmd[0], samples[-1]["turn_chosen"])

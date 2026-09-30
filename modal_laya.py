@@ -788,6 +788,60 @@ def teacher_ceiling(courses: str = "mixed-x4,no-climb-x4,pockets-x4,tactics-x4,t
     print("wrote", d)
 
 
+ROVER_SET_TEACHER_SHARP = ROVER_SET_TEACHER + "_sharp"
+
+
+@app.function(cpu=2, memory=8192, timeout=30 * 60, volumes={"/data": data_vol})
+def build_rover_set_teacher_sharp_job():
+    """drone_rover_teacher with each question's target on the teacher's own choice instead of the T=5 blend of
+    all 45 candidates (whose probability-weighted read is 2-3 m/s off the choice): speed and slide from the
+    record's best candidate, the turn from the next decision's prev_turn in the same flight (the chosen turn;
+    the flight's last decision, which has none, keeps its blend sharpened by squaring). Same images (by relative
+    path), same splits; create-only."""
+    _enter()
+    import collections, rover_data, command
+    src, dst = "/data/vqa/%s" % ROVER_SET_TEACHER, "/data/vqa/%s" % ROVER_SET_TEACHER_SHARP
+    if os.path.exists(os.path.join(dst, "_READY")):
+        raise SystemExit("%s already exists; refusing to overwrite" % dst)
+    os.makedirs(dst, exist_ok=True)
+    counts = {}
+    for split in ("train", "val"):
+        recs = [json.loads(l) for l in open(os.path.join(src, split + ".jsonl")) if l.strip()]
+        by_flight = collections.defaultdict(dict)
+        for r in recs:
+            by_flight[(r["course"], r["seed"])].setdefault(r["t"], {})[r["id"].rsplit("-", 1)[1]] = r
+        out, fallback = [], 0
+        for decs in by_flight.values():
+            ts = sorted(decs)
+            for k, t in enumerate(ts):
+                nxt = decs[ts[k + 1]] if k + 1 < len(ts) else None
+                for q, r in decs[t].items():
+                    if q == "cmd_speed":
+                        tgt = rover_data.soft_target(float(r["best"][0]), command.SPEED_LEVELS)
+                    elif q == "cmd_slide":
+                        tgt = rover_data.soft_target(float(r["best"][1]), command.SLIDE_LEVELS)
+                    elif nxt is not None:
+                        turn = json.loads(next(iter(nxt.values()))["state_text"])["prev_turn"]
+                        tgt = rover_data.soft_target(float(turn), command.TURN_LEVELS)
+                    else:
+                        p = [x * x for x in r["target"]]
+                        tgt = [x / sum(p) for x in p]
+                        fallback += 1
+                    out.append(dict(r, image="../%s/%s" % (ROVER_SET_TEACHER, r["image"]),
+                                    target=[round(x, 4) for x in tgt],
+                                    label=int(max(range(len(tgt)), key=tgt.__getitem__)), target_kind="choice"))
+        with open(os.path.join(dst, split + ".jsonl"), "w") as f:
+            for r in out:
+                f.write(json.dumps(r) + "\n")
+        counts[split] = {"records": len(out), "turn_fallback": fallback}
+    json.dump({"source": ROVER_SET_TEACHER, "counts": counts,
+               "targets": "teacher's chosen speed/slide (best), chosen turn (next prev_turn)"},
+              open(os.path.join(dst, "meta.json"), "w"), indent=1)
+    open(os.path.join(dst, "_READY"), "w").close()
+    data_vol.commit()
+    return counts
+
+
 @app.function(cpu=1, timeout=120, volumes={"/data": data_vol})
 def rover_set_ready(name: str):
     return os.path.exists("/data/vqa/%s/_READY" % name)
