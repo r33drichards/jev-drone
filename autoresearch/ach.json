@@ -224,7 +224,7 @@
  "experiments": [
   {
    "id": "X8",
-   "status": "queued",
+   "status": "running",
    "cost": "CPU dataset + 1 A100-hour training + 6 GPU diagnostic flights",
    "kind": "intervention (H9)",
    "what": "Keep the previous command but drop it out: retrain from v3.4/best on teacher_sharp where each record's prev_speed/prev_turn is replaced by 0/0 with probability 0.5 (ChauffeurNet's past-motion dropout; Wen et al. 2020), then the diagnostic WITH the previous command (the student's own) and the copycat probe.",
@@ -238,7 +238,8 @@
     "H9",
     "H1",
     "H5"
-   ]
+   ],
+   "run": "drone-rover-v3.8-prevdrop"
   },
   {
    "id": "X1",

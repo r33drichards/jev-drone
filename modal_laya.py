@@ -816,6 +816,40 @@ def teacher_ceiling(courses: str = "mixed-x4,no-climb-x4,pockets-x4,tactics-x4,t
 
 ROVER_SET_TEACHER_SHARP = ROVER_SET_TEACHER + "_sharp"
 ROVER_SET_TEACHER_NOPREV = ROVER_SET_TEACHER_SHARP + "_noprev"
+ROVER_SET_TEACHER_PREVDROP = ROVER_SET_TEACHER_SHARP + "_prevdrop"
+
+
+@app.function(cpu=2, memory=8192, timeout=30 * 60, volumes={"/data": data_vol})
+def build_rover_set_teacher_prevdrop_job(p_drop: float = 0.5):
+    """drone_rover_teacher_sharp with the previous command (prev_speed, prev_turn) zeroed in a fraction p_drop of
+    the decisions, the same draw for all three questions of a decision (by its id): past-motion dropout
+    (ChauffeurNet), so the student keeps the previous command as information but cannot lean on it (autoresearch
+    X8). Train split only; val keeps the recorded values. Create-only."""
+    import hashlib
+    src, dst = "/data/vqa/%s" % ROVER_SET_TEACHER_SHARP, "/data/vqa/%s" % ROVER_SET_TEACHER_PREVDROP
+    if os.path.exists(os.path.join(dst, "_READY")):
+        raise SystemExit("%s already exists; refusing to overwrite" % dst)
+    os.makedirs(dst, exist_ok=True)
+    counts = {}
+    for split in ("train", "val"):
+        n = dropped = 0
+        with open(os.path.join(dst, split + ".jsonl"), "w") as f:
+            for line in open(os.path.join(src, split + ".jsonl")):
+                r = json.loads(line)
+                stem = r["id"].rsplit("-", 1)[0]
+                if split == "train" and int(hashlib.md5(stem.encode()).hexdigest()[:8], 16) / 16 ** 8 < p_drop:
+                    st = json.loads(r["state_text"])
+                    st["prev_speed"], st["prev_turn"] = 0.0, 0.0
+                    r["state_text"] = json.dumps(st)
+                    dropped += 1
+                f.write(json.dumps(r) + "\n")
+                n += 1
+        counts[split] = {"records": n, "prev_dropped": dropped}
+    json.dump({"source": ROVER_SET_TEACHER_SHARP, "p_drop": p_drop, "counts": counts},
+              open(os.path.join(dst, "meta.json"), "w"), indent=1)
+    open(os.path.join(dst, "_READY"), "w").close()
+    data_vol.commit()
+    return counts
 
 
 @app.function(cpu=2, memory=8192, timeout=30 * 60, volumes={"/data": data_vol})
