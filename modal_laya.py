@@ -661,6 +661,38 @@ def teacher_fly(course: str, seed: int, seconds: float, decode: str = "best"):
     return json.dumps(teacher.fly(course, seed, seconds, decode=decode))
 
 
+@app.function(gpu=["L4", "A10G"], cpu=4, memory=16384, timeout=3 * 60 * 60, max_containers=GPU_MAX,
+              volumes={"/cache/hf": hf_vol, "/ckpt": ckpt_vol.read_only()})
+def teacher_diagnose_job(course: str, seed: int, seconds: float, model: str):
+    """The student flies in the teacher's world while the teacher scores every state (teacher.diagnose)."""
+    os.environ["MUJOCO_GL"] = os.environ["PYOPENGL_PLATFORM"] = "egl"
+    _enter()
+    import teacher
+    return json.dumps(teacher.diagnose(course, seed, seconds, model), default=float)
+
+
+@app.local_entrypoint()
+def teacher_diagnose(model: str = "/ckpt/smolvlm/drone-rover-v3.5/best", courses: str = "town-x4,mixed-x4,pockets-x4",
+                     seeds: str = "0,1", seconds: float = 25.0):
+    """Student-vs-teacher diagnostic; write results/teacher-diag/<timestamp>/episodes.jsonl."""
+    jobs = [(c, int(s)) for c in courses.split(",") for s in seeds.split(",")]
+    d = os.path.join(HERE, "results", "teacher-diag", time.strftime("%Y%m%d-%H%M%S"))
+    os.makedirs(d, exist_ok=True)
+    calls = [teacher_diagnose_job.spawn(c, s, seconds, model) for c, s in jobs]
+    for j, fc in zip(jobs, calls):
+        r = _get(fc)
+        if isinstance(r, Exception):
+            print("FAILED", j, repr(r)[:300], flush=True)
+            continue
+        with open(os.path.join(d, "episodes.jsonl"), "a") as f:
+            f.write(r + "\n")
+        r = json.loads(r)
+        print("%-10s seed=%d vis=%.0f%% hits=%d decisions=%d wall=%ss" % (
+            r["course"], r["seed"], r["target_visible_pct"], r["collisions"], len(r["decisions"]), r["wall_s"]),
+            flush=True)
+    print("wrote", d)
+
+
 @app.function(cpu=2, memory=6144, timeout=4 * 60 * 60, volumes={"/data": data_vol})
 def teacher_record_job(course: str, seed: int, seconds: float, split: str):
     """The teacher flies one course recording every decision (teacher.fly record=True); write the frames to the

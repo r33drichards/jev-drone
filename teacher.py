@@ -143,11 +143,15 @@ class World:
         p.v_cmd, p.b3_prev, p.recovering, self.yaw_cmd = s[0].copy(), None if s[1] is None else s[1].copy(), s[2], s[3]
 
     def setpoint(self, cmd, t):
-        """Velocity (world) and yaw setpoints for a command at time t (privileged: aims at the true rover)."""
+        """Velocity (world) and yaw setpoints for a command at time t (privileged: aims at the true rover). A
+        4th element is an absolute heading (rad) to hold instead, the way the student's command flies."""
         d = self.d
         pos, yaw = d.qpos[:3], _yaw(d.qpos[3:7])
-        rv = self.c.rover_pose(t)
-        want = float(np.arctan2(rv[1] - pos[1], rv[0] - pos[0])) + np.deg2rad(cmd[2])
+        if len(cmd) > 3:
+            want = float(cmd[3])
+        else:
+            rv = self.c.rover_pose(t)
+            want = float(np.arctan2(rv[1] - pos[1], rv[0] - pos[0])) + np.deg2rad(cmd[2])
         prev = yaw if self.yaw_cmd is None else self.yaw_cmd
         prev = yaw + float(np.clip(_wrap(prev - yaw), -0.6, 0.6))
         step = YAW_RATE * DT * CTRL_EVERY
@@ -243,6 +247,65 @@ def _decoded(w, t, scores, temp):
     turn = np.deg2rad(command.read(tg["cmd_turn"], command.TURN_LEVELS))
     return (command.read(tg["cmd_speed"], command.SPEED_LEVELS), command.read(tg["cmd_slide"], command.SLIDE_LEVELS),
             float(np.rad2deg(_wrap(yaw + turn - to_rover))))
+
+
+def diagnose(course, seed=0, seconds=35.0, model=None, alt=1.6):
+    """The student (command.LayaCommand on `model`) flies the course in the teacher's world, sim time paused
+    for its answers (no latency), while the teacher scores every state it reaches: per decision the student's
+    command, the teacher's best, both commands' rollout scores (the student's regret), and whether the rover is
+    in view. Tells a student that disagrees with the teacher from the start (weak imitation) from one that
+    agrees until it drifts somewhere the teacher never flew (covariate shift: DAgger's case)."""
+    import command, flight, avoid
+    student = command.LayaCommand(model)
+    w = World(course, seed)
+    eye = flight.Eye(w.m, rgb_size=(512, 384))
+    rng = np.random.default_rng(seed)
+    if hasattr(w.c, "start_pose"):
+        w.d.qpos[:7] = w.c.start_pose(rng, alt)
+    else:
+        w.d.qpos[:3] = [1.5 + rng.uniform(-.3, .3), rng.uniform(-.5, .5), alt]
+        w.d.qpos[3:7] = [1, 0, 0, 0]
+    mujoco.mj_forward(w.m, w.d)
+    w.nav = NavGrid(w)
+    per = int(DECIDE_S / DT)
+    rows, hits, hit_objs, prev, cmd = [], 0, set(), (0.0, 0.0), (0.5, 0.0, 0.0)
+    wall0 = time.time()
+    for i in range(int(seconds / DT)):
+        t = i * DT
+        if i % per == 0:
+            pos, yaw = w.d.qpos[:3].copy(), _yaw(w.d.qpos[3:7])
+            scene = eye.look(w.d, pos, yaw, t)
+            sp, rel = avoid.travel(w.d.qvel[:3], yaw)
+            ctx = {"altitude_m": round(float(pos[2]), 2), "speed_mps": round(sp, 2), "travel_deg": round(rel, 0),
+                   "prev_speed": round(float(prev[0]), 1), "prev_turn": round(float(prev[1]), 0),
+                   "lidar": avoid.sensor(scene)}
+            a = student.answer(eye.last_rgb, ctx)
+            cmd = (a["speed"], a["slide"], 0.0, yaw + np.deg2rad(a["turn"]))
+            best, sc = decide(w, t)
+            mujoco.mj_copyData(w.scratch, w.m, w.d)
+            ps = w.pilot_state()
+            s_student = rollout(w, cmd, t)
+            mujoco.mj_copyData(w.d, w.m, w.scratch)
+            w.set_pilot_state(ps)
+            w._sp = None
+            rv = w.c.rover_pose(t)
+            to_rover = float(np.arctan2(rv[1] - pos[1], rv[0] - pos[0]))
+            seen, dist = w.sees_rover(t)
+            rows.append({"t": round(t, 2), "visible": bool(seen), "cam_visible": bool(scene["target"]["visible"]),
+                         "dist": round(dist, 1), "student": a,
+                         "teacher": {"speed": best[0], "slide": best[1],
+                                     "turn": round(float(np.rad2deg(_wrap(to_rover + np.deg2rad(best[2]) - yaw))), 1)},
+                         "score_student": round(s_student, 1), "score_best": round(float(max(sc)), 1),
+                         "score_median": round(float(np.median(sc)), 1),
+                         "n_safe": int(sum(s > -500 for s in sc))})
+            prev = (a["speed"], a["turn"])
+        hit = w.step(cmd, t, i % per)
+        if hit is not None and hit not in hit_objs:
+            hit_objs.add(hit)
+            hits += 1
+    return {"course": course, "seed": seed, "model": model, "collisions": hits, "decisions": rows,
+            "target_visible_pct": round(100 * float(np.mean([r["visible"] for r in rows])), 1),
+            "wall_s": round(time.time() - wall0, 1)}
 
 
 def fly(course, seed=0, seconds=60.0, alt=1.6, path=True, record=False, decode="best"):
