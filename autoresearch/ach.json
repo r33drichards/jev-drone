@@ -171,6 +171,24 @@
     "H9": "CC"
    },
    "note": "Direct test of H9: the student leans on the previous command and follows it even when it is unrelated to the frame. The image-only skill left over is weak, which is also what H1 and H5 predict, so they stay open."
+  },
+  {
+   "id": "E10",
+   "text": "X7 intervention: v3.7 trained without the previous command in its context. Held-out mean top-1 54.9% (v3.6 image-only ~51%, with its shortcut 60%). Diagnostic vs v3.6: rover in view 33% vs 21%, hits 15 vs 20; 3-8 s in view 39% vs 32%, regret 3.0 vs 5.0; 8-25 s in view 20% vs 4%, regret 0.4 vs 2.4; but 0-3 s heading error 31 vs 17 deg. One flight (town-x4 seed 1) kept the rover in view 97% with no hit.",
+   "source": "autoresearch/runs/X7.md; results/teacher-diag/20260930-192034",
+   "credibility": "high",
+   "ratings": {
+    "H1": "C",
+    "H2": "N",
+    "H3": "N",
+    "H4": "C",
+    "H5": "I",
+    "H6": "N",
+    "H7": "N",
+    "H8": "N",
+    "H9": "C"
+   },
+   "note": "Removing the shortcut helps after the start (H9 is a real contributor, as predicted) but is not a fix; without the crutch the early steering is worse: the image-only skill is weak (H1 or H4). H5 predicted no flight gain: mildly against."
   }
  ],
  "experiments": [
@@ -208,7 +226,7 @@
   },
   {
    "id": "X7",
-   "status": "running",
+   "status": "done",
    "cost": "CPU dataset + 1 A100-hour training + 6 GPU diagnostic flights",
    "kind": "intervention (H9)",
    "what": "Retrain from v3.4/best on drone_rover_teacher_sharp with prev_speed/prev_turn removed from the context (drone_rover_teacher_sharp_noprev), same mix and schedule as v3.6 (run drone-rover-v3.7-noprev); then the student-vs-teacher diagnostic (keys without prev) and compare with v3.6.",
@@ -223,7 +241,8 @@
     "H9",
     "H5",
     "H1"
-   ]
+   ],
+   "result": "E10"
   },
   {
    "id": "X2",
@@ -260,7 +279,7 @@
   },
   {
    "id": "X4",
-   "status": "queued",
+   "status": "running",
    "cost": "CPU + small analysis",
    "what": "Observability check: from recorded teacher decisions, how well do observation-only features (rover bearing and range in the frame, lidar, speed) predict the teacher's chosen turn and speed, vs privileged features (rover future position)? Fit a small model on each feature set and compare accuracy.",
    "predictions": {
@@ -293,7 +312,7 @@
  ],
  "conclusions": {
   "ranking": "see ach.py show",
-  "summary": "H9 (causal confusion through the previous command in the context) is now directly supported (X6: the student follows even an unrelated previous command; its image-only accuracy is 35% turn / 47% speed). Running the intervention it implies (X7: retrain without the previous command). Perception (H1) and observability (H5) remain open because the image-only skill is weak either way.",
+  "summary": "H9 (copycat through the previous command) is real: removing it (X7) raised rover-in-view after the start from 4% to 20% (8-25 s) and cut collisions, but the student's steering from the image alone is still weak (early heading error 31 deg). The open question is whether the image carries what the teacher decides on (H1 perception / H4 training) or not (H5 observability): X4 fits the teacher's choices from true observable vs privileged features.",
   "milestones": [
    "X6: if the student's accuracy collapses with shuffled prev_* and its answers track it, retrain without prev_* (or with it dropped out) as the intervention",
    "X3/X4 still split perception from observability"
