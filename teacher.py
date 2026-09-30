@@ -399,7 +399,37 @@ def rl_fly(course, seed=0, seconds=30.0, model=None, sample_seed=0, temp=1.0, al
             "decisions": len(samples), "wall_s": round(time.time() - wall0, 1), "samples": samples}
 
 
-def fly(course, seed=0, seconds=60.0, alt=1.6, path=True, record=False, decode="best"):
+def _features(w, t, cmd, lidar):
+    """autoresearch X4: what the teacher decided and what it decided from. `obs`: what a camera + lidar + IMU
+    student could know now (rover visible, its bearing and range while visible, speed, direction of travel,
+    altitude, the 24 lidar sectors); `priv`: what only the teacher knows (the rover's position in the drone's frame
+    1, 2 and 3 s ahead, and its velocity); `choice`: the command's speed, slide and turn from the nose (deg)."""
+    import avoid
+    pos, yaw = w.d.qpos[:3].copy(), _yaw(w.d.qpos[3:7])
+    seen, dist = w.sees_rover(t)
+    rv = np.asarray(w.c.rover_pose(t), dtype=float)
+    c, s = np.cos(yaw), np.sin(yaw)
+
+    def body(p):
+        d = np.asarray(p, dtype=float)[:2] - pos[:2]
+        return [float(c * d[0] + s * d[1]), float(-s * d[0] + c * d[1])]
+
+    bearing = float(np.rad2deg(_wrap(np.arctan2(rv[1] - pos[1], rv[0] - pos[0]) - yaw)))
+    sp, rel = avoid.travel(w.d.qvel[:3], yaw)
+    lidar.scan(w.d, pos, yaw, t)
+    turn = (float(np.rad2deg(_wrap(cmd[3] - yaw))) if len(cmd) > 3
+            else float(np.rad2deg(_wrap(np.arctan2(rv[1] - pos[1], rv[0] - pos[0]) + np.deg2rad(cmd[2]) - yaw))))
+    vel = (np.asarray(w.c.rover_pose(t + 0.1), dtype=float) - rv)[:2] / 0.1
+    return {"obs": {"visible": bool(seen), "bearing": bearing if seen else None, "range": round(dist, 2) if seen else None,
+                    "speed": round(sp, 2), "travel": round(rel, 1), "alt": round(float(pos[2]), 2),
+                    "lidar": lidar.summary()["sectors"]},
+            "priv": {"fut1": body(w.c.rover_pose(t + 1.0)), "fut2": body(w.c.rover_pose(t + 2.0)),
+                     "fut3": body(w.c.rover_pose(t + 3.0)), "now": body(rv),
+                     "vel": [float(c * vel[0] + s * vel[1]), float(-s * vel[0] + c * vel[1])]},
+            "choice": {"speed": float(cmd[0]), "slide": float(cmd[1]), "turn": round(turn, 1)}}
+
+
+def fly(course, seed=0, seconds=60.0, alt=1.6, path=True, record=False, decode="best", features=False):
     """The teacher flies the course itself (the ceiling check). -> an episode-like result dict. `path`: score
     the path distance on a NavGrid (else the straight-line distance, the first version). `record`: also render
     the onboard camera and lidar at every decision (flight.Eye) and return out["samples"]: per decision the JPEG
@@ -413,6 +443,10 @@ def fly(course, seed=0, seconds=60.0, alt=1.6, path=True, record=False, decode="
         import flight
         eye = flight.Eye(w.m, rgb_size=(512, 384))
     samples, prev = [], (0.0, 0.0)
+    lidar = None
+    if features:
+        import flight
+        lidar = flight.Lidar(w.m)
     rng = np.random.default_rng(seed)
     if hasattr(w.c, "start_pose"):
         w.d.qpos[:7] = w.c.start_pose(rng, alt)
@@ -450,6 +484,8 @@ def fly(course, seed=0, seconds=60.0, alt=1.6, path=True, record=False, decode="
                 prev = (cmd[0], samples[-1]["turn_chosen"])
             decisions.append({"t": round(t, 2), "cmd": cmd, "best": round(max(sc), 1),
                               "n_safe": int(sum(s > -500 for s in sc))})
+            if features:
+                decisions[-1]["feat"] = _features(w, t, cmd, lidar)
         hit = w.step(cmd, t, i % per)
         if hit is not None and hit not in hit_objs:
             hit_objs.add(hit)
@@ -486,6 +522,8 @@ def fly(course, seed=0, seconds=60.0, alt=1.6, path=True, record=False, decode="
     out["ok"] = bool(out.get("finished_at_s") is not None or out.get("lap_done_at_s"))
     if record:
         out["samples"] = samples
+    if features:
+        out["decision_log"] = [{k: v for k, v in dd.items() if k != "cmd"} for dd in decisions]
     return out
 
 

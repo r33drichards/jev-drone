@@ -656,11 +656,34 @@ def sim_speed_check(gls: str = "osmesa,egl", seconds: float = 30.0):
 
 
 @app.function(cpu=2, memory=4096, timeout=3 * 60 * 60)
-def teacher_fly(course: str, seed: int, seconds: float, decode: str = "best"):
+def teacher_fly(course: str, seed: int, seconds: float, decode: str = "best", features: bool = False):
     """The lookahead teacher (teacher.py) flies a course itself: the ceiling check. CPU only."""
     _enter()
     import teacher
-    return json.dumps(teacher.fly(course, seed, seconds, decode=decode))
+    return json.dumps(teacher.fly(course, seed, seconds, decode=decode, features=features))
+
+
+@app.local_entrypoint()
+def teacher_features(courses: str = "mixed-x4,no-climb-x4,pockets-x4,tactics-x4,town-x4,city-x4",
+                     seeds: str = "20,21,22,23"):
+    """autoresearch X4: teacher flights logging, per decision, observable and privileged features and its choice
+    (teacher._features) -> autoresearch/runs/X4-data.jsonl."""
+    lengths = {"tactics-x4": 40.0, "town-x4": 60.0, "city-x4": 90.0}
+    jobs = [(c, int(s), lengths.get(c, 35.0)) for c in courses.split(",") for s in seeds.split(",")]
+    calls = [teacher_fly.spawn(c, s, sec, "best", True) for c, s, sec in jobs]
+    path = os.path.join(HERE, "autoresearch", "runs", "X4-data.jsonl")
+    with open(path, "w") as f:
+        for j, fc in zip(jobs, calls):
+            r = _get(fc)
+            if isinstance(r, Exception):
+                print("FAILED", j, repr(r)[:200], flush=True)
+                continue
+            r = json.loads(r)
+            f.write(json.dumps({"course": r["course"], "seed": r["seed"], "ok": r["ok"],
+                                "decisions": r["decision_log"]}) + "\n")
+            print("%-12s seed=%d ok=%s decisions=%d" % (r["course"], r["seed"], r["ok"], len(r["decision_log"])),
+                  flush=True)
+    print("wrote", path)
 
 
 @app.function(gpu=["L4", "A10G"], cpu=4, memory=16384, timeout=3 * 60 * 60, max_containers=GPU_MAX,
