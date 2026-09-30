@@ -332,7 +332,7 @@ RL_W = {"visible": 1.0, "band": 0.5, "hit": -3.0, "crash": -10.0, "path": 0.2}  
 RL_BAND_M = (2.0, 8.0)       # standoff that counts as "with the rover"
 
 
-def rl_fly(course, seed=0, seconds=30.0, model=None, sample_seed=0, temp=1.0, alt=1.6, student=None):
+def rl_fly(course, seed=0, seconds=30.0, model=None, sample_seed=0, temp=1.0, alt=1.6, student=None, snapshots=None):
     """One on-policy rollout for outcome-reward RL (RLVR): the student flies the course in the teacher's world,
     sim time paused for its answers, SAMPLING each command (speed, slide, turn level) from its own answer
     probabilities (sharpened or flattened by `temp`), and every decision interval (DECIDE_S) earns a verifiable
@@ -384,6 +384,8 @@ def rl_fly(course, seed=0, seconds=30.0, model=None, sample_seed=0, temp=1.0, al
         w._sp = None
         new_hits = 0
         for j in range(per):
+            if snapshots is not None and (i + j) % SNAP_EVERY == 0:
+                snapshots.append(_snap(w, (i + j) * DT, hits_total + new_hits, eye))
             hit = w.step(cmd, (i + j) * DT, j)
             if hit is not None and hit not in hit_objs:
                 hit_objs.add(hit)
