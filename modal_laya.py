@@ -791,6 +791,66 @@ def teacher_ceiling(courses: str = "mixed-x4,no-climb-x4,pockets-x4,tactics-x4,t
 ROVER_SET_TEACHER_SHARP = ROVER_SET_TEACHER + "_sharp"
 
 
+@app.function(gpu=["L4", "A10G"], cpu=4, memory=16384, timeout=60 * 60,
+              volumes={"/cache/hf": hf_vol, "/ckpt": ckpt_vol.read_only(), "/data": data_vol.read_only()})
+def copycat_probe_job(model: str, n: int = 600, seed: int = 0):
+    """autoresearch X6: how much does the student lean on the previous command in its context? It answers `n`
+    held-out teacher decisions (teacher_sharp val) with the recorded prev_speed / prev_turn, with those of a random
+    other decision, and with 0 / 0. -> per condition and question: top-1 vs the teacher's choice, and the
+    correlation of the answer (probability-weighted level) with the injected previous value."""
+    _enter()
+    import collections, random
+    import numpy as np
+    from PIL import Image
+    import command
+    base = "/data/vqa/%s" % ROVER_SET_TEACHER_SHARP
+    by = collections.defaultdict(dict)
+    for line in open(os.path.join(base, "val.jsonl")):
+        r = json.loads(line)
+        stem, q = r["id"].rsplit("-", 1)
+        by[stem][q] = r
+    stems = sorted(s for s, g in by.items() if len(g) == 3)
+    rng = random.Random(seed)
+    pick = rng.sample(stems, min(n, len(stems)))
+    donors = [json.loads(by[rng.choice(stems)]["cmd_turn"]["state_text"]) for _ in pick]
+    student = command.LayaCommand(model)
+    levels = {"cmd_speed": command.SPEED_LEVELS, "cmd_slide": command.SLIDE_LEVELS, "cmd_turn": command.TURN_LEVELS}
+    out = {c: {q: {"hit": [], "ans": [], "prev": []} for q in levels} for c in ("recorded", "shuffled", "zero")}
+    for stem, donor in zip(pick, donors):
+        g = by[stem]
+        frame = np.asarray(Image.open(os.path.join(base, g["cmd_turn"]["image"])).convert("RGB"))
+        ctx0 = json.loads(g["cmd_turn"]["state_text"])
+        for cond, ctx in (("recorded", ctx0), ("shuffled", dict(ctx0, prev_speed=donor["prev_speed"],
+                                                               prev_turn=donor["prev_turn"])),
+                          ("zero", dict(ctx0, prev_speed=0.0, prev_turn=0.0))):
+            p = student.probs(frame, ctx)
+            for q in levels:
+                o = out[cond][q]
+                o["hit"].append(int(np.argmax(p[q])) == int(g[q]["label"]))
+                o["ans"].append(command.read(p[q], levels[q]))
+                o["prev"].append(ctx["prev_turn"] if q == "cmd_turn" else ctx["prev_speed"] if q == "cmd_speed"
+                                 else 0.0)
+    res = {"model": model, "n": len(pick)}
+    for cond, qs in out.items():
+        res[cond] = {}
+        for q, o in qs.items():
+            corr = (float(np.corrcoef(o["ans"], o["prev"])[0, 1])
+                    if q != "cmd_slide" and np.std(o["prev"]) > 0 and np.std(o["ans"]) > 0 else None)
+            res[cond][q] = {"top1": round(float(np.mean(o["hit"])), 3),
+                            "corr_answer_prev": None if corr is None else round(corr, 3)}
+    return res
+
+
+@app.local_entrypoint()
+def copycat_probe(model: str = "/ckpt/smolvlm/drone-rover-v3.6/best", n: int = 600):
+    r = copycat_probe_job.remote(model, n)
+    d = os.path.join(HERE, "autoresearch", "runs")
+    os.makedirs(d, exist_ok=True)
+    tag = os.path.basename(os.path.dirname(model.rstrip("/"))) or "model"
+    json.dump(r, open(os.path.join(d, "X6-%s.json" % tag), "w"), indent=1)
+    print(json.dumps(r, indent=1))
+
+
 @app.function(gpu=["L4", "A10G"], cpu=4, memory=16384, timeout=60 * 60, max_containers=GPU_MAX,
               volumes={"/cache/hf": hf_vol, "/ckpt": ckpt_vol.read_only(), "/data": data_vol})
 def rl_rollout_job(course: str, seed: int, g: int, seconds: float, model: str, set_name: str, temp: float = 1.0):

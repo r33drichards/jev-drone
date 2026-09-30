@@ -1,68 +1,264 @@
 {
-  "question": "Why does Laya, flying by command, fail to follow the 4x rover that the lookahead teacher follows, and what fixes it?",
-  "hypotheses": {
-    "H1": "Perception: from one 512x384 frame Laya cannot localise the rover (bearing, range) precisely enough to steer at 4x.",
-    "H2": "Control: a held absolute heading, the 120 deg/s yaw-rate cap and 4-7 Hz commands cannot track the 4x rover even with right decisions.",
-    "H3": "Covariate shift: small early errors take Laya to states the teacher never visited, where it has no data and cannot recover (DAgger's case).",
-    "H4": "Under-training: the imitation is not converged (60% top-1, still rising); more steps or data on the same targets would fix it.",
-    "H5": "Partial observability: the teacher's choice depends on privileged information (where the rover will be, the map round corners) that one frame + lidar + speed does not contain, so no student can match it from these inputs.",
-    "H6": "Latency: answers arrive too late (0.1 s compute, up to 0.6 s freshness) for a 4x rover.",
-    "H7": "Action parameterisation: independent marginals over speed / slide / turn and coarse levels (turn +-20/45/90 deg) cannot express the teacher's joint choice.",
-    "H8": "Train/deploy mismatch: the inputs at flight time differ from the recorded training inputs (frame, context keys or semantics, lidar), a bug."
+ "question": "Why does Laya, flying by command, fail to follow the 4x rover that the lookahead teacher follows, and what fixes it?",
+ "hypotheses": {
+  "H1": "Perception: from one 512x384 frame Laya cannot localise the rover (bearing, range) precisely enough to steer at 4x.",
+  "H2": "Control: a held absolute heading, the 120 deg/s yaw-rate cap and 4-7 Hz commands cannot track the 4x rover even with right decisions.",
+  "H3": "Covariate shift: small early errors take Laya to states the teacher never visited, where it has no data and cannot recover (DAgger's case).",
+  "H4": "Under-training: the imitation is not converged (60% top-1, still rising); more steps or data on the same targets would fix it.",
+  "H5": "Partial observability: the teacher's choice depends on privileged information (where the rover will be, the map round corners) that one frame + lidar + speed does not contain, so no student can match it from these inputs.",
+  "H6": "Latency: answers arrive too late (0.1 s compute, up to 0.6 s freshness) for a 4x rover.",
+  "H7": "Action parameterisation: independent marginals over speed / slide / turn and coarse levels (turn +-20/45/90 deg) cannot express the teacher's joint choice.",
+  "H8": "Train/deploy mismatch: the inputs at flight time differ from the recorded training inputs (frame, context keys or semantics, lidar), a bug.",
+  "H9": "Causal confusion (copycat): the context carries the previous command (prev_speed, prev_turn), which in the teacher's data predicts its next choice well; the student learned to lean on it, and in flight its own lagging commands feed back into it (de Haan et al. 2019, 'Causal Confusion in Imitation Learning'; Wen et al. 2020, 'Fighting Copycat Agents')."
+ },
+ "evidence": [
+  {
+   "id": "E1",
+   "text": "Teacher, deciding at 4 Hz from privileged state but holding the decided heading between decisions (bestfix), follows the 4x rover 16/16; with blurred T=5 targets decoded (softfix:5) 20/20.",
+   "source": "results/teacher/ (decode bestfix, softfix:5), commit 8bb54f8",
+   "credibility": "high",
+   "ratings": {
+    "H1": "N",
+    "H2": "II",
+    "H3": "N",
+    "H4": "N",
+    "H5": "C",
+    "H6": "I",
+    "H7": "I",
+    "H8": "N",
+    "H9": "N"
+   },
+   "note": "Held heading + yaw cap + 4 Hz suffice given right decisions (against H2); commands snapped to the command levels still fly (against H7; the turn is continuous in bestfix, so H7 only partly). 0.25 s decisions with no latency: weakly against H6."
   },
-  "evidence": [
-    {"id": "E1", "text": "Teacher, deciding at 4 Hz from privileged state but holding the decided heading between decisions (bestfix), follows the 4x rover 16/16; with blurred T=5 targets decoded (softfix:5) 20/20.",
-     "source": "results/teacher/ (decode bestfix, softfix:5), commit 8bb54f8", "credibility": "high",
-     "ratings": {"H1": "N", "H2": "II", "H3": "N", "H4": "N", "H5": "C", "H6": "I", "H7": "I", "H8": "N"},
-     "note": "Held heading + yaw cap + 4 Hz suffice given right decisions (against H2); commands snapped to the command levels still fly (against H7; the turn is continuous in bestfix, so H7 only partly). 0.25 s decisions with no latency: weakly against H6."},
-    {"id": "E2", "text": "Student-vs-teacher diagnostic, paused sim time (no latency): v3.6 fails as in wall clock (rover in view 15-29%, 2-5 hits per 25 s).",
-     "source": "results/teacher-diag/20260930-070513", "credibility": "high",
-     "ratings": {"H1": "C", "H2": "N", "H3": "C", "H4": "C", "H5": "C", "H6": "II", "H7": "C", "H8": "C"}},
-    {"id": "E3", "text": "v3.6 in its first 3 s (rover in view 100%, states the teacher recorded from): speed 5.0-5.5 vs teacher 5.3-6.3, heading off by 11-32 deg (median), slide 0.2-1.2 vs 1.2-1.8; regret 1-4.",
-     "source": "results/teacher-diag/20260930-070513", "credibility": "high",
-     "ratings": {"H1": "C", "H2": "N", "H3": "I", "H4": "C", "H5": "C", "H6": "N", "H7": "C", "H8": "C"},
-     "note": "Errors already present before any drift: against covariate shift as the ROOT cause (it can still compound them)."},
-    {"id": "E4", "text": "After ~3 s v3.6 loses the rover (in view 15-55%) and regret grows; heading lags the teacher's turn into corners (-13 vs -36 deg).",
-     "source": "results/teacher-diag/20260930-070513", "credibility": "high",
-     "ratings": {"H1": "C", "H2": "N", "H3": "C", "H4": "C", "H5": "CC", "H6": "N", "H7": "C", "H8": "C"}},
-    {"id": "E5", "text": "Sharp targets (v3.6) vs blurred (v3.5): first-3-s speed 2.5-3.4 -> 5.0-5.5, heading error ~33 -> 11-32 deg, held-out top-1 52% -> 60% (still rising at the end).",
-     "source": "results/teacher-diag/ (045635 vs 070513); v3.5/v3.6 training logs", "credibility": "high",
-     "ratings": {"H1": "N", "H2": "N", "H3": "N", "H4": "C", "H5": "N", "H6": "N", "H7": "C", "H8": "I"},
-     "note": "The student tracks what its targets say, so its inputs do carry the signal it trained on: weakly against a gross mismatch bug."},
-    {"id": "E6", "text": "Four iterations of outcome-reward RL (90 sampled flights each) from v3.6: return 11.3, 10.1, 14.3, 9.9; rover in view 16-20%; held-out teacher NLL 1.0 -> 2.1.",
-     "source": "results/rl/iter1-4", "credibility": "medium",
-     "ratings": {"H1": "C", "H2": "N", "H3": "N", "H4": "N", "H5": "C", "H6": "N", "H7": "N", "H8": "C"},
-     "note": "Weak: sparse, noisy RL failing is consistent with most hypotheses; it fits a cause no amount of training on these inputs removes."},
-    {"id": "E7", "text": "At 1x, Laya v3.3 steering the pursuit from its perception (visible/bearing answers) followed the rover 38/48 in wall clock and town 6/6.",
-     "source": "results/laya-steer/README.md (real-time evaluation)", "credibility": "medium",
-     "ratings": {"H1": "I", "H2": "N", "H3": "N", "H4": "N", "H5": "N", "H6": "I", "H7": "N", "H8": "N"},
-     "note": "Laya localised the rover well enough at 1x from one frame; 4x needs more precision and anticipation, so only weakly against H1."}
-  ],
-  "experiments": [
-    {"id": "X1", "status": "queued", "cost": "code audit, minutes",
-     "what": "Audit train vs deploy inputs: for the same simulator state, build the context and frame the way teacher.fly(record=True) recorded them and the way teacher.diagnose / run.py flight feed them; diff state_text keys and values (prev_turn sign and units, lidar sector order, travel_deg), image size, JPEG vs raw, camera pose.",
-     "predictions": {"H8": "a difference appears", "others": "identical inputs"},
-     "diagnostic_for": ["H8"]},
-    {"id": "X2", "status": "queued", "cost": "CPU, ~30 min",
-     "what": "Teacher with commands quantised exactly as the student outputs them (speed/slide/turn snapped to the levels, turn relative to the nose at decision time, held) on the six 4x courses x 4 seeds.",
-     "predictions": {"H7": "success rate falls clearly below 36/36", "others": "still ~all succeed"},
-     "diagnostic_for": ["H7", "H2"]},
-    {"id": "X3", "status": "queued", "cost": "GPU, 6 flights x ~15 min",
-     "what": "Oracle-heading hybrid: v3.6 flies in the teacher's world with its own speed and slide but the turn replaced by the teacher's (and, separately, speed/slide from the teacher and turn from Laya).",
-     "predictions": {"H1": "oracle turn fixes most failures; Laya's turn with oracle speed/slide still fails", "H5": "same as H1 (the turn needs privileged anticipation)", "H3": "oracle turn helps early but drift errors in speed/slide still accumulate", "H4": "partial help from either", "others": "little change"},
-     "diagnostic_for": ["H1", "H5", "H3", "H4"]},
-    {"id": "X4", "status": "queued", "cost": "CPU + small analysis",
-     "what": "Observability check: from recorded teacher decisions, how well do observation-only features (rover bearing and range in the frame, lidar, speed) predict the teacher's chosen turn and speed, vs privileged features (rover future position)? Fit a small model on each feature set and compare accuracy.",
-     "predictions": {"H5": "privileged features predict far better than observable ones", "H1": "observable-feature model (with TRUE bearing) predicts well: the gap is Laya's perception", "others": "n/a"},
-     "diagnostic_for": ["H5", "H1"]},
-    {"id": "X5", "status": "queued", "cost": "GPU, one DAgger round (~2 h collect + 1 h train)",
-     "what": "One DAgger round: v3.6 flies, the teacher labels every state (sharp targets), retrain, re-run the diagnostic.",
-     "predictions": {"H3": "later-seconds regret falls clearly, rover in view rises", "H5": "little gain: labels at the new states are equally unpredictable from the inputs", "H4": "some gain from more data", "others": "little change"},
-     "diagnostic_for": ["H3", "H5", "H4"]}
-  ],
-  "conclusions": {
-    "ranking": "see ach.py show",
-    "summary": "Initial matrix from the runs so far. Control (H2) and latency (H6) are strongly disconfirmed; covariate shift as the root cause is weakened by errors present before any drift (E3). Perception (H1), partial observability (H5), under-training (H4), parameterisation (H7) and a mismatch bug (H8) remain; first experiments are chosen to split them.",
-    "milestones": ["X1 finds a mismatch -> fix it and re-run the diagnostic before anything else", "X3/X4 separate perception from observability, which decide between better perception training and giving the student more information (history, a rover track)"]
+  {
+   "id": "E2",
+   "text": "Student-vs-teacher diagnostic, paused sim time (no latency): v3.6 fails as in wall clock (rover in view 15-29%, 2-5 hits per 25 s).",
+   "source": "results/teacher-diag/20260930-070513",
+   "credibility": "high",
+   "ratings": {
+    "H1": "C",
+    "H2": "N",
+    "H3": "C",
+    "H4": "C",
+    "H5": "C",
+    "H6": "II",
+    "H7": "C",
+    "H8": "C",
+    "H9": "C"
+   }
+  },
+  {
+   "id": "E3",
+   "text": "v3.6 in its first 3 s (rover in view 100%, states the teacher recorded from): speed 5.0-5.5 vs teacher 5.3-6.3, heading off by 11-32 deg (median), slide 0.2-1.2 vs 1.2-1.8; regret 1-4.",
+   "source": "results/teacher-diag/20260930-070513",
+   "credibility": "high",
+   "ratings": {
+    "H1": "C",
+    "H2": "N",
+    "H3": "I",
+    "H4": "C",
+    "H5": "C",
+    "H6": "N",
+    "H7": "C",
+    "H8": "C",
+    "H9": "C"
+   },
+   "note": "Errors already present before any drift: against covariate shift as the ROOT cause (it can still compound them)."
+  },
+  {
+   "id": "E4",
+   "text": "After ~3 s v3.6 loses the rover (in view 15-55%) and regret grows; heading lags the teacher's turn into corners (-13 vs -36 deg).",
+   "source": "results/teacher-diag/20260930-070513",
+   "credibility": "high",
+   "ratings": {
+    "H1": "C",
+    "H2": "N",
+    "H3": "C",
+    "H4": "C",
+    "H5": "CC",
+    "H6": "N",
+    "H7": "C",
+    "H8": "C",
+    "H9": "CC"
+   }
+  },
+  {
+   "id": "E5",
+   "text": "Sharp targets (v3.6) vs blurred (v3.5): first-3-s speed 2.5-3.4 -> 5.0-5.5, heading error ~33 -> 11-32 deg, held-out top-1 52% -> 60% (still rising at the end).",
+   "source": "results/teacher-diag/ (045635 vs 070513); v3.5/v3.6 training logs",
+   "credibility": "high",
+   "ratings": {
+    "H1": "N",
+    "H2": "N",
+    "H3": "N",
+    "H4": "C",
+    "H5": "N",
+    "H6": "N",
+    "H7": "C",
+    "H8": "I",
+    "H9": "C"
+   },
+   "note": "The student tracks what its targets say, so its inputs do carry the signal it trained on: weakly against a gross mismatch bug."
+  },
+  {
+   "id": "E6",
+   "text": "Four iterations of outcome-reward RL (90 sampled flights each) from v3.6: return 11.3, 10.1, 14.3, 9.9; rover in view 16-20%; held-out teacher NLL 1.0 -> 2.1.",
+   "source": "results/rl/iter1-4",
+   "credibility": "medium",
+   "ratings": {
+    "H1": "C",
+    "H2": "N",
+    "H3": "N",
+    "H4": "N",
+    "H5": "C",
+    "H6": "N",
+    "H7": "N",
+    "H8": "C",
+    "H9": "C"
+   },
+   "note": "Weak: sparse, noisy RL failing is consistent with most hypotheses; it fits a cause no amount of training on these inputs removes."
+  },
+  {
+   "id": "E7",
+   "text": "At 1x, Laya v3.3 steering the pursuit from its perception (visible/bearing answers) followed the rover 38/48 in wall clock and town 6/6.",
+   "source": "results/laya-steer/README.md (real-time evaluation)",
+   "credibility": "medium",
+   "ratings": {
+    "H1": "I",
+    "H2": "N",
+    "H3": "N",
+    "H4": "N",
+    "H5": "N",
+    "H6": "I",
+    "H7": "N",
+    "H8": "N",
+    "H9": "N"
+   },
+   "note": "Laya localised the rover well enough at 1x from one frame; 4x needs more precision and anticipation, so only weakly against H1."
+  },
+  {
+   "id": "E8",
+   "text": "X1 audit: flight and training build the same context keys in the same order, same Eye, 512x384 frame, same turn convention; only differences: training frames were JPEG q90, flight frames raw, and prev_speed/prev_turn are the teacher's previous choice in training but the student's own in flight. In the teacher's held-out data, copying prev_turn gets the turn level right 49% (majority 21%), prev_speed the speed 65% (majority 43%); corr 0.77 / 0.68.",
+   "source": "autoresearch/runs/X1.md",
+   "credibility": "high",
+   "ratings": {
+    "H1": "N",
+    "H2": "N",
+    "H3": "N",
+    "H4": "N",
+    "H5": "N",
+    "H6": "N",
+    "H7": "N",
+    "H8": "I",
+    "H9": "CC"
+   },
+   "note": "No bug-level mismatch (against H8). The copy-the-previous-command baseline nearly equals the student's 60% top-1: the shortcut is available and strong."
   }
+ ],
+ "experiments": [
+  {
+   "id": "X1",
+   "status": "done",
+   "cost": "code audit, minutes",
+   "what": "Audit train vs deploy inputs: for the same simulator state, build the context and frame the way teacher.fly(record=True) recorded them and the way teacher.diagnose / run.py flight feed them; diff state_text keys and values (prev_turn sign and units, lidar sector order, travel_deg), image size, JPEG vs raw, camera pose.",
+   "predictions": {
+    "H8": "a difference appears",
+    "others": "identical inputs"
+   },
+   "diagnostic_for": [
+    "H8"
+   ],
+   "result": "E8"
+  },
+  {
+   "id": "X6",
+   "status": "queued",
+   "cost": "GPU, 1 job, ~15 min",
+   "what": "Copycat probe: v3.6 answers 600 held-out teacher decisions (drone_rover_teacher_sharp val) three ways: recorded prev_speed/prev_turn; prev replaced by those of a random other decision; prev set to 0. Measure top-1 vs the teacher and how far the answer follows the injected prev.",
+   "predictions": {
+    "H9": "accuracy drops sharply with shuffled prev (toward the image-only level) and answers track the injected prev",
+    "H1": "small drop; answers follow the image",
+    "H5": "small drop",
+    "others": "small drop"
+   },
+   "diagnostic_for": [
+    "H9",
+    "H1",
+    "H5"
+   ]
+  },
+  {
+   "id": "X2",
+   "status": "queued",
+   "cost": "CPU, ~30 min",
+   "what": "Teacher with commands quantised exactly as the student outputs them (speed/slide/turn snapped to the levels, turn relative to the nose at decision time, held) on the six 4x courses x 4 seeds.",
+   "predictions": {
+    "H7": "success rate falls clearly below 36/36",
+    "others": "still ~all succeed"
+   },
+   "diagnostic_for": [
+    "H7",
+    "H2"
+   ]
+  },
+  {
+   "id": "X3",
+   "status": "queued",
+   "cost": "GPU, 6 flights x ~15 min",
+   "what": "Oracle-heading hybrid: v3.6 flies in the teacher's world with its own speed and slide but the turn replaced by the teacher's (and, separately, speed/slide from the teacher and turn from Laya).",
+   "predictions": {
+    "H1": "oracle turn fixes most failures; Laya's turn with oracle speed/slide still fails",
+    "H5": "same as H1 (the turn needs privileged anticipation)",
+    "H3": "oracle turn helps early but drift errors in speed/slide still accumulate",
+    "H4": "partial help from either",
+    "others": "little change"
+   },
+   "diagnostic_for": [
+    "H1",
+    "H5",
+    "H3",
+    "H4"
+   ]
+  },
+  {
+   "id": "X4",
+   "status": "queued",
+   "cost": "CPU + small analysis",
+   "what": "Observability check: from recorded teacher decisions, how well do observation-only features (rover bearing and range in the frame, lidar, speed) predict the teacher's chosen turn and speed, vs privileged features (rover future position)? Fit a small model on each feature set and compare accuracy.",
+   "predictions": {
+    "H5": "privileged features predict far better than observable ones",
+    "H1": "observable-feature model (with TRUE bearing) predicts well: the gap is Laya's perception",
+    "others": "n/a"
+   },
+   "diagnostic_for": [
+    "H5",
+    "H1"
+   ]
+  },
+  {
+   "id": "X5",
+   "status": "queued",
+   "cost": "GPU, one DAgger round (~2 h collect + 1 h train)",
+   "what": "One DAgger round: v3.6 flies, the teacher labels every state (sharp targets), retrain, re-run the diagnostic.",
+   "predictions": {
+    "H3": "later-seconds regret falls clearly, rover in view rises",
+    "H5": "little gain: labels at the new states are equally unpredictable from the inputs",
+    "H4": "some gain from more data",
+    "others": "little change"
+   },
+   "diagnostic_for": [
+    "H3",
+    "H5",
+    "H4"
+   ]
+  }
+ ],
+ "conclusions": {
+  "ranking": "see ach.py show",
+  "summary": "X1 found no bug-level mismatch (H8 weakened) but a strong shortcut: the previous command in the context predicts the teacher's next choice about as well as the student does. New hypothesis H9 (causal confusion) leads with H4/H5; X6 tests it directly.",
+  "milestones": [
+   "X6: if the student's accuracy collapses with shuffled prev_* and its answers track it, retrain without prev_* (or with it dropped out) as the intervention",
+   "X3/X4 still split perception from observability"
+  ]
+ }
 }
