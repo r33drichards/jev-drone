@@ -257,12 +257,31 @@
     "H10": "N"
    },
    "note": "Privileged information adds at most 2 points: the teacher's choice is about as predictable from what can be observed (strongly against H5). Laya from pixels already matches a model given the true bearing and range (against H1). The turn tops out near 46% even with perfect information: many candidates score alike, so top-1 against the teacher is a weak yardstick and regret is the one to watch (this fits H7's view that the single-choice target is ill-posed). Medium credibility: simple models on hand features."
+  },
+  {
+   "id": "E14",
+   "text": "X9: continuing v3.8 for another run on the same data (v3.9) made it worse: held-out mean top-1 59.7 -> 57.4%, image-only turn 48.2 -> 44.5%; diagnostic rover in view 41% -> 24% (8-25 s: 23% -> 9%), hits 16 -> 19.",
+   "source": "autoresearch/runs/X9.md; X6-drone-rover-v3.9-prevdrop-cont.json; results/teacher-diag/20260930-214613",
+   "credibility": "high",
+   "ratings": {
+    "H1": "N",
+    "H2": "N",
+    "H3": "C",
+    "H4": "II",
+    "H5": "N",
+    "H6": "N",
+    "H7": "N",
+    "H8": "N",
+    "H9": "N",
+    "H10": "C"
+   },
+   "note": "Under-training predicted a clear rise; held-out and image-only numbers (1000+ decisions) fell: against H4. More passes over the same teacher states hurt (overfitting shows up beyond one budget, H10) and do not reach the states the student drifts into (H3). The 6-flight diagnostic alone is noisy; the held-out drop carries the weight."
   }
  ],
  "experiments": [
   {
    "id": "X10",
-   "status": "queued (after X9)",
+   "status": "running",
    "cost": "per iteration: 120 GPU rollouts (~3 GPU-hours) + ~0.5 A100-hour",
    "kind": "test + intervention (H3 vs H4), approved by the human",
    "what": "Outcome-reward RL (teacher.rl_fly rewards, group-relative advantages) from the better of v3.8-prevdrop / v3.9 (by the X9 diagnostic): 5 courses x seeds 110-111 x groups of 12, groups whose returns differ by less than 2.0 (std) left out, anchor data drone_rover_teacher_sharp_prevdrop; up to 4 iterations. The RL rows carry the student's own previous command, so they are copycat-safe.",
@@ -275,11 +294,12 @@
    "diagnostic_for": [
     "H3",
     "H4"
-   ]
+   ],
+   "base": "drone-rover-v3.8-prevdrop/best"
   },
   {
    "id": "X9",
-   "status": "running",
+   "status": "done",
    "cost": "1 A100-hour training + 7 GPU jobs",
    "kind": "test (H4 vs H3)",
    "what": "Continue v3.8-prevdrop for another run of the same length on the same data (drone-rover-v3.9-prevdrop-cont, init v3.8-prevdrop/best), then the copycat probe and the diagnostic.",
@@ -293,7 +313,8 @@
     "H4",
     "H3",
     "H10"
-   ]
+   ],
+   "result": "E14"
   },
   {
    "id": "X8",
@@ -438,7 +459,7 @@
  ],
  "conclusions": {
   "ranking": "see ach.py show",
-  "summary": "Best supported: causal confusion (H9), whose fixes (X7, X8) raised the image-only skill and doubled rover-in-view. Rejected or strongly weakened: control limits (H2), latency (H6), a train/deploy bug (H8), missing information (H5: privileged features add <= 2 points, X4), and a perception ceiling (H1: Laya from pixels matches a model given the true bearing). Open: why flights still drift late (23% in view after 8 s): under-training (H4, X9 running) vs compounding drift into unvisited states (H3, DAgger X5 pending the human's OK). Note: the teacher's top-1 is capped near 46% (turn) even with perfect information, so regret, not top-1, is the yardstick.",
+  "summary": "Causal confusion (H9) is the best-supported cause and its fix (previous-command dropout, v3.8) is the best student so far (rover in view 41%). Under-training (H4) is now disconfirmed: more passes over the same teacher data made v3.8 worse (X9), which also shows overfitting beyond one budget (H10). Missing information (H5), a perception ceiling (H1), control (H2), latency (H6) and a pipeline bug (H8) are rejected or strongly weakened. What remains is late drift into states the teacher never visited (H3): X10, outcome-reward RL on the student's own flights from v3.8, tests and targets it.",
   "milestones": [
    "X4: if true observables predict the teacher's turn well, H5 is rejected and the gap is learnable",
    "X5 (DAgger from v3.8, with previous-command dropout kept) vs a longer v3.8 run: whichever raises late rover-in-view decides H3 vs H4",
