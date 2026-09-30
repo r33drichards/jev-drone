@@ -35,12 +35,13 @@ def question():
     }
 
 
-def soft_targets(cands, scores, turns):
+def soft_targets(cands, scores, turns, temp=None):
     """Per-question soft targets from the teacher's candidate scores. `cands`: (speed, slide, offset) per
-    candidate; `turns`: each candidate's heading setpoint relative to the nose (deg) at the decision."""
+    candidate; `turns`: each candidate's heading setpoint relative to the nose (deg) at the decision. `temp`:
+    the softmax temperature over scores (default TEMP)."""
     from rover_data import soft_target
     s = np.asarray(scores, dtype=float)
-    p = np.exp((s - s.max()) / TEMP)
+    p = np.exp((s - s.max()) / (TEMP if temp is None else temp))
     p = p / p.sum()
     out = {}
     for name, levels, val in (("cmd_speed", SPEED_LEVELS, [c[0] for c in cands]),

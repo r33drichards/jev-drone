@@ -224,6 +224,35 @@ class Lidar:
         return self.last * np.cos(self.ang), self.last * np.sin(self.ang), self.last
 
 
+def _seg_render(r):
+    """Geom ids per pixel from a segmentation Renderer. mujoco's render() indexes a table sized by the scene's
+    geoms with every pixel's decoded id, and now and then (a big scene like the city, EGL) a pixel decodes past
+    it and the flight dies with an IndexError; this redoes the same readout with those pixels as background."""
+    try:
+        return r.render()[:, :, 0]
+    except IndexError:
+        if r._gl_context:
+            r._gl_context.make_current()
+        buf = np.empty((r.height, r.width, 3), dtype=np.uint8)
+        flags = r._scene.flags.copy()
+        r._scene.flags[mujoco.mjtRndFlag.mjRND_SEGMENT] = True
+        r._scene.flags[mujoco.mjtRndFlag.mjRND_IDCOLOR] = True
+        mujoco.mjr_render(r._rect, r._scene, r._mjr_context)
+        mujoco.mjr_readPixels(buf, None, r._rect, r._mjr_context)
+        np.copyto(r._scene.flags, flags)
+        b = buf.astype(np.int64)
+        segid = b[:, :, 0] + b[:, :, 1] * 256 + b[:, :, 2] * 65536
+        n = r._scene.ngeom
+        table = np.full(n + 1, -1, dtype=np.int32)
+        for g in r._scene.geoms[:n]:
+            if g.segid != -1:
+                table[g.segid + 1] = g.objid
+        out = np.full(segid.shape, -1, dtype=np.int32)
+        ok = segid <= n
+        out[ok] = table[segid[ok]]
+        return np.flipud(out) if r._gl_context else out
+
+
 class Eye:
     """Onboard forward camera -> symbolic scene summary.
 
@@ -313,7 +342,7 @@ class Eye:
         self.depth.update_scene(data, self.cam)
         z = np.clip(self.depth.render(), 0.0, self.MAX_RANGE)
         self.seg.update_scene(data, self.cam)
-        seg = self.seg.render()[:, :, 0]
+        seg = _seg_render(self.seg)
         if self.rgb is not None:
             self.rgb.update_scene(data, self.cam)
             self.last_rgb = self.rgb.render()

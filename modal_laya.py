@@ -654,11 +654,11 @@ def sim_speed_check(gls: str = "osmesa,egl", seconds: float = 30.0):
 
 
 @app.function(cpu=2, memory=4096, timeout=3 * 60 * 60)
-def teacher_fly(course: str, seed: int, seconds: float):
+def teacher_fly(course: str, seed: int, seconds: float, decode: str = "best"):
     """The lookahead teacher (teacher.py) flies a course itself: the ceiling check. CPU only."""
     _enter()
     import teacher
-    return json.dumps(teacher.fly(course, seed, seconds))
+    return json.dumps(teacher.fly(course, seed, seconds, decode=decode))
 
 
 @app.function(cpu=2, memory=6144, timeout=4 * 60 * 60, volumes={"/data": data_vol})
@@ -730,7 +730,7 @@ def build_rover_set_teacher(train: str = "mixed-x4:30-41,no-climb-x4:50-61,pocke
 
 @app.local_entrypoint()
 def teacher_ceiling(courses: str = "mixed-x4,no-climb-x4,pockets-x4,tactics-x4,town-x4,city-x4",
-                    seeds: str = "0,1,2,3,4,5,6,7,8,9,10,11"):
+                    seeds: str = "0,1,2,3,4,5,6,7,8,9,10,11", decode: str = "best"):
     """Fly the lookahead teacher on every (course, seed); write results/teacher/<timestamp>/episodes.jsonl."""
     import re
     lengths = {"tactics": 40.0, "town": 60.0, "city": 90.0}
@@ -741,7 +741,7 @@ def teacher_ceiling(courses: str = "mixed-x4,no-climb-x4,pockets-x4,tactics-x4,t
     jobs = [(k, int(s), secs(k)) for k in courses.split(",") for s in seeds.split(",")]
     d = os.path.join(HERE, "results", "teacher", time.strftime("%Y%m%d-%H%M%S"))
     os.makedirs(d, exist_ok=True)
-    calls = [teacher_fly.spawn(*j) for j in jobs]
+    calls = [teacher_fly.spawn(*j, decode=decode) for j in jobs]
     for j, fc in zip(jobs, calls):
         r = _get(fc)
         if isinstance(r, Exception):

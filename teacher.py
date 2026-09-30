@@ -231,11 +231,27 @@ def decide(w, t):
     return CANDIDATES[int(np.argmax(scores))], scores
 
 
-def fly(course, seed=0, seconds=60.0, alt=1.6, path=True, record=False):
+def _decoded(w, t, scores, temp):
+    """What a student that learned the soft targets perfectly would fly: each question's probability-weighted
+    level (command.read) from command.soft_targets at `temp`, as a (speed, slide, rover-bearing offset) command."""
+    import command
+    pos, yaw = w.d.qpos[:3], _yaw(w.d.qpos[3:7])
+    rv = w.c.rover_pose(t)
+    to_rover = float(np.arctan2(rv[1] - pos[1], rv[0] - pos[0]))
+    turns = [float(np.rad2deg(_wrap(to_rover + np.deg2rad(c[2]) - yaw))) for c in CANDIDATES]
+    tg = command.soft_targets(CANDIDATES, scores, turns, temp)
+    turn = np.deg2rad(command.read(tg["cmd_turn"], command.TURN_LEVELS))
+    return (command.read(tg["cmd_speed"], command.SPEED_LEVELS), command.read(tg["cmd_slide"], command.SLIDE_LEVELS),
+            float(np.rad2deg(_wrap(yaw + turn - to_rover))))
+
+
+def fly(course, seed=0, seconds=60.0, alt=1.6, path=True, record=False, decode="best"):
     """The teacher flies the course itself (the ceiling check). -> an episode-like result dict. `path`: score
     the path distance on a NavGrid (else the straight-line distance, the first version). `record`: also render
     the onboard camera and lidar at every decision (flight.Eye) and return out["samples"]: per decision the JPEG
-    frame, the command context (command.CMD_KEYS) and the soft targets (command.soft_targets)."""
+    frame, the command context (command.CMD_KEYS) and the soft targets (command.soft_targets). `decode`: "best"
+    flies the best candidate; "soft:<temp>" flies what a perfect student of the soft targets at that temperature
+    would (_decoded), the check that the targets can carry the teacher's skill."""
     w = World(course, seed)
     eye = None
     if record:
@@ -267,6 +283,8 @@ def fly(course, seed=0, seconds=60.0, alt=1.6, path=True, record=False):
                 pos0, yaw0 = w.d.qpos[:3].copy(), _yaw(w.d.qpos[3:7])
                 scene = eye.look(w.d, pos0, yaw0, t)
             cmd, sc = decide(w, t)
+            if decode != "best":
+                cmd = _decoded(w, t, sc, float(decode.split(":")[1]))
             if eye is not None:
                 samples.append(_sample(w, eye, scene, pos0, yaw0, t, sc, prev, course, seed))
                 prev = (cmd[0], samples[-1]["turn_chosen"])
@@ -302,7 +320,7 @@ def fly(course, seed=0, seconds=60.0, alt=1.6, path=True, record=False):
            "decisions": len(decisions), "no_safe_option_pct": round(100 * float(np.mean([d["n_safe"] == 0 for d in decisions])), 1),
            "wall_s": round(time.time() - wall0, 1), "candidates": len(CANDIDATES),
            "horizon_s": HORIZON_S, "decide_s": DECIDE_S, "path_score": bool(path),
-           "nav_grid_s": round(t_nav, 1)}
+           "nav_grid_s": round(t_nav, 1), "decode": decode}
     if lap is not None:
         lap.report(out, standoffs)
     out["ok"] = bool(out.get("finished_at_s") is not None or out.get("lap_done_at_s"))
