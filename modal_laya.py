@@ -1922,7 +1922,7 @@ def _best_gif(kind, course, seed, seconds, model, noprev, scale, sample_seed=0):
     snaps = []
     if kind == "teacher":
         r = teacher.fly(course, seed, seconds, snapshots=snaps)
-        who = "lookahead teacher (privileged)"
+        who = "planner with full map knowledge (not Laya)"
         summary = "%s  |  rover in view %.0f%%  |  collisions %d" % (
             "finished" if r["ok"] else "not finished", r["target_visible_pct"], r["collisions"])
     elif kind == "rl":                  # a sampled RL rollout, re-flown with the same sampling seed
@@ -1966,16 +1966,24 @@ BEST_RUNS = [   # (kind, course, seed, seconds, model, noprev, sample_seed): the
 ]
 
 
+TEACHER_RUNS = [
+    ("teacher", "town-x4", 0, 60.0, "", False, 0), ("teacher", "city-x4", 0, 90.0, "", False, 0),
+    ("teacher", "mixed-x4", 0, 35.0, "", False, 0), ("teacher", "pockets-x4", 0, 35.0, "", False, 0),
+    ("teacher", "tactics-x4", 0, 40.0, "", False, 0),
+]
+
+
 @app.local_entrypoint()
-def best_gifs():
+def best_gifs(which: str = "model"):
     """Real-time (1x) GIFs of BEST_RUNS: the model's best 4x flights so far, re-flown in the teacher's world (a
     diagnostic flight without the teacher's scoring, or a sampled RL rollout with its sampling seed)
     -> results/gifs-best/<timestamp>/."""
     d = os.path.join(HERE, "results", "gifs-best", time.strftime("%Y%m%d-%H%M%S"))
     os.makedirs(d, exist_ok=True)
+    runs = TEACHER_RUNS if which == "teacher" else BEST_RUNS
     calls = [(best_gif_cpu if k == "teacher" else best_gif_gpu).spawn(k, c, s, sec, m, npv, g)
-             for k, c, s, sec, m, npv, g in BEST_RUNS]
-    for (k, c, s, sec, m, npv, g), fc in zip(BEST_RUNS, calls):
+             for k, c, s, sec, m, npv, g in runs]
+    for (k, c, s, sec, m, npv, g), fc in zip(runs, calls):
         r = _get(fc)
         if isinstance(r, Exception):
             print("FAILED", k, c, s, repr(r)[:300], flush=True)
