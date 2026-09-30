@@ -316,12 +316,31 @@
     "H10": "N"
    },
    "note": "A measurement flaw, not evidence between hypotheses: every flight-level comparison so far (E2-E4, E10, E12, E14, the RL collections) used the contaminated metric. The held-out and probe numbers (E5, E9, E13) are unaffected. From here the yardstick is clean tracking (rover in view before the first collision) and first-collision time; RL rollouts end at the first collision. v3.6-v3.9 are being re-scored on 20 flights each (X11)."
+  },
+  {
+   "id": "E17",
+   "text": "X11 clean-tracking evaluation, 20 flights each (5 courses x seeds 0-3, 30 s): v3.6: clean view 4.4\u00b10.3 s, first collision 5.3\u00b10.4 s, collision-free 0/20; v3.7-noprev: clean view 5.7\u00b11.2 s, first collision 6.5\u00b11.2 s, collision-free 0/20; v3.8-prevdrop: clean view 4.6\u00b10.3 s, first collision 5.8\u00b10.7 s, collision-free 0/20; v3.9-prevdrop-cont: clean view 5.3\u00b11.0 s, first collision 6.8\u00b11.3 s, collision-free 1/20. Every 4x student collides within about 5-7 s; the differences between them are within about 1 s.",
+   "source": "results/student-eval/20260930-225518",
+   "credibility": "high",
+   "ratings": {
+    "H1": "N",
+    "H2": "N",
+    "H3": "C",
+    "H4": "N",
+    "H5": "N",
+    "H6": "N",
+    "H7": "N",
+    "H8": "N",
+    "H9": "I",
+    "H10": "N"
+   },
+   "note": "Measured cleanly, the copycat fixes (v3.7, v3.8) buy about a second at most before the first collision: removing the shortcut raised the image-only skill (E9, E12) but does not by itself make the student fly safely at 4x. Against H9 as the main cause of the flight failure (it stays a real, measured shortcut). Everything collides early, in states it drifts into within seconds (H3), and avoidance is not being learned: the next experiments should look at collisions directly."
   }
  ],
  "experiments": [
   {
    "id": "X11",
-   "status": "running",
+   "status": "done",
    "cost": "80 GPU flights (~2 GPU-hours)",
    "kind": "measurement",
    "what": "Re-score v3.6, v3.7-noprev, v3.8-prevdrop, v3.9 by clean tracking (seconds with the rover in view before the first collision), first-collision time and collision-free flights: 5 courses x seeds 0-3, 30 s (student_eval).",
@@ -333,7 +352,8 @@
    "diagnostic_for": [
     "H9",
     "H10"
-   ]
+   ],
+   "result": "E17"
   },
   {
    "id": "X10",
@@ -516,7 +536,7 @@
  ],
  "conclusions": {
   "ranking": "see ach.py show",
-  "summary": "Measurement correction (E16): the flight metric counted time after collisions and the RL reward paid for a view from a wall; both are fixed (clean tracking; rollouts end at the first collision) and X10 is paused. Held-out/probe evidence stands: causal confusion (H9) is the best-supported cause, missing information (H5) and a perception ceiling (H1) are strongly weakened, under-training (H4) is disconfirmed. X11 re-scores the students on 20 flights each with the clean metric before RL resumes.",
+  "summary": "With the clean yardstick (X11) every 4x student collides within ~5-7 s, and the copycat fixes gain at most ~1 s: causal confusion (H9) is a real shortcut (held-out and probe evidence) but not the main cause of the flight failure. Rejected or weakened: control (H2), latency (H6), pipeline bug (H8), missing information (H5), perception ceiling (H1), under-training (H4). Leading now: drift into unvisited states (H3) and the collision behaviour itself; the 1x v3.3 (code avoidance reflex + Laya pursuit) finishes 12/12, so what 4x lacks is avoidance at speed. Next: look at where and why the students collide, and resume RL with the collision-terminated reward (X10).",
   "milestones": [
    "X4: if true observables predict the teacher's turn well, H5 is rejected and the gap is learnable",
    "X5 (DAgger from v3.8, with previous-command dropout kept) vs a longer v3.8 run: whichever raises late rover-in-view decides H3 vs H4",
