@@ -238,6 +238,25 @@
     "H10": "N"
    },
    "note": "With the shortcut made unreliable the image-only skill jumps (turn 35% -> 48%) and flights improve most after the start: the shortcut was starving image learning (H9). That the image-only skill can rise this much with the same frames argues against H5 (the frame lacks the information) and against a hard perception ceiling (H1); what remains (23% in view late, 16 hits) fits compounding drift (H3) and more training (H4)."
+  },
+  {
+   "id": "E13",
+   "text": "X4 observability fit (4720 teacher decisions, 24 flights, held out by seed; best of softmax regression / kNN): turn level from TRUE observables 44.7% (majority 26.9%), + memory of 2 previous decisions 46.3%, + privileged future rover positions 45.5%; speed 59.1 / 60.0 / 60.5% (majority 37.8%); slide 69.5 / 69.6 / 71.4% (majority 36.9%). v3.8's image-only turn top-1 (48%, X8) already matches the true-observable model.",
+   "source": "autoresearch/runs/X4-fit.json, X4-data.jsonl, x4_fit.py",
+   "credibility": "medium",
+   "ratings": {
+    "H1": "I",
+    "H2": "N",
+    "H3": "N",
+    "H4": "N",
+    "H5": "II",
+    "H6": "N",
+    "H7": "C",
+    "H8": "N",
+    "H9": "N",
+    "H10": "N"
+   },
+   "note": "Privileged information adds at most 2 points: the teacher's choice is about as predictable from what can be observed (strongly against H5). Laya from pixels already matches a model given the true bearing and range (against H1). The turn tops out near 46% even with perfect information: many candidates score alike, so top-1 against the teacher is a weak yardstick and regret is the one to watch (this fits H7's view that the single-choice target is ill-posed). Medium credibility: simple models on hand features."
   }
  ],
  "experiments": [
@@ -366,7 +385,7 @@
   },
   {
    "id": "X4",
-   "status": "running",
+   "status": "done",
    "cost": "CPU + small analysis",
    "what": "Observability check: teacher flights (six 4x courses x seeds 20-23) log per decision the TRUE observable features (rover visible, bearing, range, speed, travel, altitude, lidar), the same plus the two previous decisions' observations (memory), and the same plus privileged ones (the rover 1-3 s ahead in the drone's frame, its velocity); softmax regression and kNN predict the teacher's turn / speed / slide level, held out by seed (autoresearch/x4_fit.py).",
    "predictions": {
@@ -378,7 +397,8 @@
    "diagnostic_for": [
     "H5",
     "H1"
-   ]
+   ],
+   "result": "E13"
   },
   {
    "id": "X5",
@@ -400,7 +420,7 @@
  ],
  "conclusions": {
   "ranking": "see ach.py show",
-  "summary": "Causal confusion (H9) is the best-supported cause: removing (X7) or dropping out (X8) the previous command raises the student's image-only skill (turn 35% -> 48%) and doubles rover-in-view (21% -> 41%), most after the start. The same frames supporting a much better image-only skill weakens H5 (missing information) and a hard perception limit (H1). Flights still fail later (23% in view after 8 s, ~2.7 hits a flight): next, split compounding drift (H3, DAgger on v3.8) from plain under-training (H4, same data, longer). X4 (observable vs privileged features) is still collecting.",
+  "summary": "Best supported: causal confusion (H9), whose fixes (X7, X8) raised the image-only skill and doubled rover-in-view. Rejected or strongly weakened: control limits (H2), latency (H6), a train/deploy bug (H8), missing information (H5: privileged features add <= 2 points, X4), and a perception ceiling (H1: Laya from pixels matches a model given the true bearing). Open: why flights still drift late (23% in view after 8 s): under-training (H4, X9 running) vs compounding drift into unvisited states (H3, DAgger X5 pending the human's OK). Note: the teacher's top-1 is capped near 46% (turn) even with perfect information, so regret, not top-1, is the yardstick.",
   "milestones": [
    "X4: if true observables predict the teacher's turn well, H5 is rejected and the gap is learnable",
    "X5 (DAgger from v3.8, with previous-command dropout kept) vs a longer v3.8 run: whichever raises late rover-in-view decides H3 vs H4",
