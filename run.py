@@ -494,7 +494,7 @@ def episode(seed=0, seconds=35.0, use_jev=True, video=None, hz=None, budget=None
             tactics_kw=None, appearance=None, altitude=None, altitude_model=None, altitude_hz=3.0,
             altitude_wrong_p=0.0, altitude_wrong=1.0, altitude_sharpen=1.0, record_rgb=False, yaw_desat=False,
             timing="wall", record_every=100, speed_scale=None, avoid=None, avoid_hz=6.0, emergency_m=None,
-            policy=None, cmd_model=None, cmd_hz=10.0):
+            policy=None, cmd_model=None, cmd_hz=10.0, cmd_noprev=False):
     """`record`: a list to append a snapshot to every 0.2 s of sim time (pose, obstacles,
     judgment, and the camera frame the model saw), for rendering after the flight
     (flightgif.py). Cheap, so the flight stays real time.
@@ -647,7 +647,8 @@ def episode(seed=0, seconds=35.0, use_jev=True, video=None, hz=None, budget=None
         if policy != "laya-cmd":
             raise ValueError("policy must be None or laya-cmd, got %r" % (policy,))
         import command as cmdmod
-        cmds = cmdmod.CommandStream(cmdmod.LayaCommand(cmd_model or pursuit_model or laya_model), hz=cmd_hz,
+        cmds = cmdmod.CommandStream(cmdmod.LayaCommand(cmd_model or pursuit_model or laya_model,
+                                                       keys=cmdmod.CMD_KEYS_NOPREV if cmd_noprev else None), hz=cmd_hz,
                                     gpu=gpu)
     if emergency_m is not None:
         guide.emergency_m = float(emergency_m)

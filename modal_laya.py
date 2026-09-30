@@ -234,6 +234,8 @@ CONFIGS["laya-full-wc-avoid"] = CONFIGS["laya-full-wc-rate"][:4] + (
 CONFIGS["laya-cmd-wc"] = (True, "const:hold_course", False, False,
                           {"pursuit": "code", "altitude": "laya", "policy": "laya-cmd", "timing": "wallclock",
                            "guide_tune": {"yaw_rate_dps": 120.0}})
+# the same, for a checkpoint trained without the previous command in its context (autoresearch X7)
+CONFIGS["laya-cmd-wc-noprev"] = CONFIGS["laya-cmd-wc"][:4] + (dict(CONFIGS["laya-cmd-wc"][4], cmd_noprev=True),)
 # a looser yaw-rate cap for the fast town (the rover's bearing can swing faster than 120 deg/s round a corner)
 CONFIGS["laya-full-wc-rate240"] = CONFIGS["laya-full-wc-rate"][:4] + (
     dict(CONFIGS["laya-full-wc-rate"][4], guide_tune={"yaw_rate_dps": 240.0}),)
@@ -663,22 +665,23 @@ def teacher_fly(course: str, seed: int, seconds: float, decode: str = "best"):
 
 @app.function(gpu=["L4", "A10G"], cpu=4, memory=16384, timeout=3 * 60 * 60, max_containers=GPU_MAX,
               volumes={"/cache/hf": hf_vol, "/ckpt": ckpt_vol.read_only()})
-def teacher_diagnose_job(course: str, seed: int, seconds: float, model: str):
+def teacher_diagnose_job(course: str, seed: int, seconds: float, model: str, noprev: bool = False):
     """The student flies in the teacher's world while the teacher scores every state (teacher.diagnose)."""
     os.environ["MUJOCO_GL"] = os.environ["PYOPENGL_PLATFORM"] = "egl"
     _enter()
-    import teacher
-    return json.dumps(teacher.diagnose(course, seed, seconds, model), default=float)
+    import teacher, command
+    return json.dumps(teacher.diagnose(course, seed, seconds, model,
+                                       keys=command.CMD_KEYS_NOPREV if noprev else None), default=float)
 
 
 @app.local_entrypoint()
 def teacher_diagnose(model: str = "/ckpt/smolvlm/drone-rover-v3.5/best", courses: str = "town-x4,mixed-x4,pockets-x4",
-                     seeds: str = "0,1", seconds: float = 25.0):
+                     seeds: str = "0,1", seconds: float = 25.0, noprev: bool = False):
     """Student-vs-teacher diagnostic; write results/teacher-diag/<timestamp>/episodes.jsonl."""
     jobs = [(c, int(s)) for c in courses.split(",") for s in seeds.split(",")]
     d = os.path.join(HERE, "results", "teacher-diag", time.strftime("%Y%m%d-%H%M%S"))
     os.makedirs(d, exist_ok=True)
-    calls = [teacher_diagnose_job.spawn(c, s, seconds, model) for c, s in jobs]
+    calls = [teacher_diagnose_job.spawn(c, s, seconds, model, noprev) for c, s in jobs]
     for j, fc in zip(jobs, calls):
         r = _get(fc)
         if isinstance(r, Exception):
@@ -789,6 +792,36 @@ def teacher_ceiling(courses: str = "mixed-x4,no-climb-x4,pockets-x4,tactics-x4,t
 
 
 ROVER_SET_TEACHER_SHARP = ROVER_SET_TEACHER + "_sharp"
+ROVER_SET_TEACHER_NOPREV = ROVER_SET_TEACHER_SHARP + "_noprev"
+
+
+@app.function(cpu=2, memory=8192, timeout=30 * 60, volumes={"/data": data_vol})
+def build_rover_set_teacher_noprev_job():
+    """drone_rover_teacher_sharp with prev_speed / prev_turn removed from every record's context (autoresearch
+    X7, against the copycat shortcut). Same images (relative paths resolve from the sibling directory), targets and
+    splits; create-only."""
+    _enter()
+    import command
+    src, dst = "/data/vqa/%s" % ROVER_SET_TEACHER_SHARP, "/data/vqa/%s" % ROVER_SET_TEACHER_NOPREV
+    if os.path.exists(os.path.join(dst, "_READY")):
+        raise SystemExit("%s already exists; refusing to overwrite" % dst)
+    os.makedirs(dst, exist_ok=True)
+    counts = {}
+    for split in ("train", "val"):
+        n = 0
+        with open(os.path.join(dst, split + ".jsonl"), "w") as f:
+            for line in open(os.path.join(src, split + ".jsonl")):
+                r = json.loads(line)
+                st = json.loads(r["state_text"])
+                r["state_text"] = json.dumps({k: st.get(k) for k in command.CMD_KEYS_NOPREV})
+                f.write(json.dumps(r) + "\n")
+                n += 1
+        counts[split] = n
+    json.dump({"source": ROVER_SET_TEACHER_SHARP, "context_keys": list(command.CMD_KEYS_NOPREV), "counts": counts},
+              open(os.path.join(dst, "meta.json"), "w"), indent=1)
+    open(os.path.join(dst, "_READY"), "w").close()
+    data_vol.commit()
+    return counts
 
 
 @app.function(gpu=["L4", "A10G"], cpu=4, memory=16384, timeout=60 * 60,

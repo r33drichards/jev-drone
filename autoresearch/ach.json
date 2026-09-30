@@ -153,6 +153,24 @@
     "H9": "CC"
    },
    "note": "No bug-level mismatch (against H8). The copy-the-previous-command baseline nearly equals the student's 60% top-1: the shortcut is available and strong."
+  },
+  {
+   "id": "E9",
+   "text": "X6 copycat probe (v3.6, 600 held-out teacher decisions): turn top-1 56.5% with the recorded previous command, 35.8% with a random other decision's, 35.0% with zeros; speed 66.7 -> 47.7 / 46.5; slide (no previous value in the context) 71.3 -> 68.2 / 68.5. With a foreign previous command the answer still tracks it (corr 0.56 turn, 0.63 speed). Image-only competence: turn 35% (majority 21%), speed 47% (majority 43%).",
+   "source": "autoresearch/runs/X6.md, X6-drone-rover-v3.6.json",
+   "credibility": "high",
+   "ratings": {
+    "H1": "C",
+    "H2": "N",
+    "H3": "C",
+    "H4": "N",
+    "H5": "C",
+    "H6": "N",
+    "H7": "N",
+    "H8": "N",
+    "H9": "CC"
+   },
+   "note": "Direct test of H9: the student leans on the previous command and follows it even when it is unrelated to the frame. The image-only skill left over is weak, which is also what H1 and H5 predict, so they stay open."
   }
  ],
  "experiments": [
@@ -172,7 +190,7 @@
   },
   {
    "id": "X6",
-   "status": "queued",
+   "status": "done",
    "cost": "GPU, 1 job, ~15 min",
    "what": "Copycat probe: v3.6 answers 600 held-out teacher decisions (drone_rover_teacher_sharp val) three ways: recorded prev_speed/prev_turn; prev replaced by those of a random other decision; prev set to 0. Measure top-1 vs the teacher and how far the answer follows the injected prev.",
    "predictions": {
@@ -185,6 +203,26 @@
     "H9",
     "H1",
     "H5"
+   ],
+   "result": "E9"
+  },
+  {
+   "id": "X7",
+   "status": "running",
+   "cost": "CPU dataset + 1 A100-hour training + 6 GPU diagnostic flights",
+   "kind": "intervention (H9)",
+   "what": "Retrain from v3.4/best on drone_rover_teacher_sharp with prev_speed/prev_turn removed from the context (drone_rover_teacher_sharp_noprev), same mix and schedule as v3.6 (run drone-rover-v3.7-noprev); then the student-vs-teacher diagnostic (keys without prev) and compare with v3.6.",
+   "predictions": {
+    "H9": "held-out turn top-1 clearly above v3.6's image-only 35% (the model now has to learn from the frame); diagnostic: rover in view and heading error after 3 s clearly better than v3.6, since there is no feedback of its own lag",
+    "H5": "held-out top-1 stays near 35% turn / 47% speed; no flight gain",
+    "H1": "same as H5 at this resolution; X3/X4 separate them",
+    "H4": "a modest rise, with or without prev",
+    "others": "no systematic change"
+   },
+   "diagnostic_for": [
+    "H9",
+    "H5",
+    "H1"
    ]
   },
   {
@@ -255,7 +293,7 @@
  ],
  "conclusions": {
   "ranking": "see ach.py show",
-  "summary": "X1 found no bug-level mismatch (H8 weakened) but a strong shortcut: the previous command in the context predicts the teacher's next choice about as well as the student does. New hypothesis H9 (causal confusion) leads with H4/H5; X6 tests it directly.",
+  "summary": "H9 (causal confusion through the previous command in the context) is now directly supported (X6: the student follows even an unrelated previous command; its image-only accuracy is 35% turn / 47% speed). Running the intervention it implies (X7: retrain without the previous command). Perception (H1) and observability (H5) remain open because the image-only skill is weak either way.",
   "milestones": [
    "X6: if the student's accuracy collapses with shuffled prev_* and its answers track it, retrain without prev_* (or with it dropped out) as the intervention",
    "X3/X4 still split perception from observability"

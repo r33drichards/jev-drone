@@ -251,14 +251,14 @@ def _decoded(w, t, scores, temp, fixed=False):
     return out + (yaw + turn,) if fixed else out
 
 
-def diagnose(course, seed=0, seconds=35.0, model=None, alt=1.6):
+def diagnose(course, seed=0, seconds=35.0, model=None, alt=1.6, keys=None):
     """The student (command.LayaCommand on `model`) flies the course in the teacher's world, sim time paused
     for its answers (no latency), while the teacher scores every state it reaches: per decision the student's
     command, the teacher's best, both commands' rollout scores (the student's regret), and whether the rover is
     in view. Tells a student that disagrees with the teacher from the start (weak imitation) from one that
     agrees until it drifts somewhere the teacher never flew (covariate shift: DAgger's case)."""
     import command, flight, avoid
-    student = command.LayaCommand(model)
+    student = command.LayaCommand(model, keys=keys)
     w = World(course, seed)
     eye = flight.Eye(w.m, rgb_size=(512, 384))
     rng = np.random.default_rng(seed)

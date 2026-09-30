@@ -14,6 +14,9 @@ SLIDE_LEVELS = [-1.8, 0.0, 1.8]                      # teacher.SLIDES
 TURN_LEVELS = [-90.0, -45.0, -20.0, 0.0, 20.0, 45.0, 90.0]   # deg from the nose, + = left
 TEMP = 5.0
 CMD_KEYS = ("altitude_m", "speed_mps", "travel_deg", "prev_speed", "prev_turn", "lidar")
+# without the previous command: in the teacher's data it predicts the next choice nearly as well as the student
+# does, and a student that leans on it copies its own lagging commands in flight (autoresearch X1/X6)
+CMD_KEYS_NOPREV = tuple(k for k in CMD_KEYS if not k.startswith("prev_"))
 
 
 def question():
@@ -64,10 +67,11 @@ class LayaCommand:
     instant = False
     delay_s = 0.0
 
-    def __init__(self, model=None, device=None, revision=None):
+    def __init__(self, model=None, device=None, revision=None, keys=None):
         import time
         from tactics import shared_laya
         self.agent = shared_laya(model, device, revision)
+        self.keys = tuple(keys or CMD_KEYS)
         self.qs = question()
         self.model = "laya-cmd:" + (model or "default")
         blank = np.zeros((384, 512, 3), dtype=np.uint8)
@@ -81,13 +85,13 @@ class LayaCommand:
     def probs(self, frame, context):
         """Each question's probability per level (the policy RL samples from)."""
         import laya_pursuit
-        a = self.agent.predict(laya_pursuit.v3_state(frame, context, keys=CMD_KEYS), self.qs)["answers"]
+        a = self.agent.predict(laya_pursuit.v3_state(frame, context, keys=self.keys), self.qs)["answers"]
         return {q: [float(a[q]["probabilities"][str(i)]) for i in range(len(levels))]
                 for q, levels in (("cmd_speed", SPEED_LEVELS), ("cmd_slide", SLIDE_LEVELS), ("cmd_turn", TURN_LEVELS))}
 
     def answer(self, frame, context):
         import laya_pursuit
-        a = self.agent.predict(laya_pursuit.v3_state(frame, context, keys=CMD_KEYS), self.qs)["answers"]
+        a = self.agent.predict(laya_pursuit.v3_state(frame, context, keys=self.keys), self.qs)["answers"]
         get = lambda q, levels: read([float(a[q]["probabilities"][str(i)]) for i in range(len(levels))], levels)  # noqa: E731
         return {"speed": round(get("cmd_speed", SPEED_LEVELS), 2), "slide": round(get("cmd_slide", SLIDE_LEVELS), 2),
                 "turn": round(get("cmd_turn", TURN_LEVELS), 1)}
