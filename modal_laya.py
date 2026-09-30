@@ -2039,3 +2039,37 @@ def student_eval(models: str, courses: str = "town-x4,mixed-x4,pockets-x4,tactic
         print("%-45s %6d %14.2f %14.2f %12d" % (m.split("smolvlm/")[-1], len(rs), mean([r["clean_view_s"] for r in rs]),
                                                 mean(fh), sum(r["collisions"] == 0 for r in rs)), flush=True)
     print("wrote", d)
+
+
+@app.function(cpu=1, memory=4096, timeout=6 * 60 * 60, volumes={"/data": data_vol})
+def gif_coordinator(runs: list, name: str):
+    """best_gifs on Modal (survives the client going away): render every run and write the GIFs and runs.jsonl
+    to /data/share-gifs/<name>/ on the datasets volume (fetch with `modal volume get laya-datasets
+    share-gifs/<name> <dir>`)."""
+    d = "/data/share-gifs/%s" % name
+    os.makedirs(d, exist_ok=True)
+    calls = [(best_gif_cpu if k == "teacher" else best_gif_gpu).spawn(k, c, s, sec, m, npv, g)
+             for k, c, s, sec, m, npv, g in runs]
+    for (k, c, s, sec, m, npv, g), fc in zip(runs, calls):
+        r = _get(fc)
+        if isinstance(r, Exception):
+            print("FAILED", k, c, s, repr(r)[:300], flush=True)
+            continue
+        gif, res = r
+        tag = "teacher" if k == "teacher" else os.path.basename(os.path.dirname(m.rstrip("/")))
+        fn = "%s-%s-seed%d%s.gif" % (tag, c, s, "-sample%d" % g if k == "rl" else "")
+        open(os.path.join(d, fn), "wb").write(gif)
+        with open(os.path.join(d, "runs.jsonl"), "a") as f:
+            f.write(json.dumps(dict(res, gif=fn), default=float) + "\n")
+        data_vol.commit()
+        print("wrote", fn, flush=True)
+    open(os.path.join(d, "_DONE"), "w").close()
+    data_vol.commit()
+
+
+@app.local_entrypoint()
+def best_gifs_detached(which: str = "teacher", name: str = ""):
+    """Run with --detach: gif_coordinator renders TEACHER_RUNS or BEST_RUNS on Modal."""
+    name = name or "%s-%s" % (which, time.strftime("%Y%m%d-%H%M%S"))
+    fc = gif_coordinator.spawn(TEACHER_RUNS if which == "teacher" else BEST_RUNS, name)
+    print("gif coordinator", fc.object_id, "->", "share-gifs/" + name)
