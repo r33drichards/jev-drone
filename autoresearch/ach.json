@@ -186,7 +186,7 @@
    "id": "E10",
    "text": "X7 intervention: v3.7 trained without the previous command in its context. Held-out mean top-1 54.9% (v3.6 image-only ~51%, with its shortcut 60%). Diagnostic vs v3.6: rover in view 33% vs 21%, hits 15 vs 20; 3-8 s in view 39% vs 32%, regret 3.0 vs 5.0; 8-25 s in view 20% vs 4%, regret 0.4 vs 2.4; but 0-3 s heading error 31 vs 17 deg. One flight (town-x4 seed 1) kept the rover in view 97% with no hit.",
    "source": "autoresearch/runs/X7.md; results/teacher-diag/20260930-192034",
-   "credibility": "high",
+   "credibility": "medium",
    "ratings": {
     "H1": "C",
     "H2": "N",
@@ -224,7 +224,7 @@
    "id": "E12",
    "text": "X8 intervention: v3.8 trained with the previous command zeroed in half the decisions. Copycat probe: turn top-1 54.7% recorded / 41.3% foreign / 48.2% zeroed (v3.6: 56.5 / 35.8 / 35.0), speed 66.2 / 52.5 / 61.5; the answer's correlation with a foreign previous command 0.42 (v3.6 0.56). Diagnostic: rover in view 41% (v3.6 21%, v3.7 33%); 3-8 s in view 64% with heading error 29 deg (v3.6 32% / 52, v3.7 39% / 46); 8-25 s in view 23%; 16 hits; none of the 6 flights kept the rover all the way.",
    "source": "autoresearch/runs/X8.md; X6-drone-rover-v3.8-prevdrop.json; results/teacher-diag/20260930-204106",
-   "credibility": "high",
+   "credibility": "medium",
    "ratings": {
     "H1": "I",
     "H2": "N",
@@ -276,6 +276,25 @@
     "H10": "C"
    },
    "note": "Under-training predicted a clear rise; held-out and image-only numbers (1000+ decisions) fell: against H4. More passes over the same teacher states hurt (overfitting shows up beyond one budget, H10) and do not reach the states the student drifts into (H3). The 6-flight diagnostic alone is noisy; the held-out drop carries the weight."
+  },
+  {
+   "id": "E15",
+   "text": "Re-flying the best diagnostic flights with the same model and start (no teacher scoring) gave different outcomes: v3.7 town-x4 seed 1 97% in view / 0 hits -> 52% / 3; v3.8 pockets-x4 seed 1 75% / 2 -> 29% / 4. Sampled RL rollouts and v3.5 town-x4 seed 0 reproduced within a few points.",
+   "source": "results/gifs-best/20260930-221157/runs.jsonl",
+   "credibility": "high",
+   "ratings": {
+    "H1": "N",
+    "H2": "N",
+    "H3": "N",
+    "H4": "N",
+    "H5": "N",
+    "H6": "N",
+    "H7": "N",
+    "H8": "N",
+    "H9": "N",
+    "H10": "N"
+   },
+   "note": "Not diagnostic between hypotheses, but it lowers the weight of single-flight results: GPU inference noise is amplified by the flight dynamics, so a 6-flight diagnostic has wide error bars. Comparisons between models should rest on the held-out / probe numbers (1000+ decisions) and on many flights (the RL collections: 90-120 flights each)."
   }
  ],
  "experiments": [
