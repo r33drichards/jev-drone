@@ -251,12 +251,25 @@ def _decoded(w, t, scores, temp, fixed=False):
     return out + (yaw + turn,) if fixed else out
 
 
-def diagnose(course, seed=0, seconds=35.0, model=None, alt=1.6, keys=None):
+def _snap(w, t, hits, eye=None):
+    """One flightgif.make_gif snapshot (the fields run.episode records), for teacher-world flights."""
+    seen, _ = w.sees_rover(t)
+    rgb = None if eye is None or getattr(eye, "last_rgb", None) is None else eye.last_rgb[::2, ::2].copy()
+    return {"t": t, "qpos": w.d.qpos.copy(), "mocap_pos": w.d.mocap_pos.copy(), "mocap_quat": w.d.mocap_quat.copy(),
+            "yaw": _yaw(w.d.qpos[3:7]), "judg": {}, "reflex": False, "climbing": False,
+            "target_visible": bool(seen), "hits": hits, "rgb": rgb}
+
+
+SNAP_EVERY = 100            # 0.2 s: the snapshot interval flightgif.make_gif expects
+
+
+def diagnose(course, seed=0, seconds=35.0, model=None, alt=1.6, keys=None, score=True, snapshots=None):
     """The student (command.LayaCommand on `model`) flies the course in the teacher's world, sim time paused
     for its answers (no latency), while the teacher scores every state it reaches: per decision the student's
     command, the teacher's best, both commands' rollout scores (the student's regret), and whether the rover is
     in view. Tells a student that disagrees with the teacher from the start (weak imitation) from one that
-    agrees until it drifts somewhere the teacher never flew (covariate shift: DAgger's case)."""
+    agrees until it drifts somewhere the teacher never flew (covariate shift: DAgger's case). `score=False`
+    skips the teacher (just the student's flight); `snapshots`: a list to append flightgif snapshots to."""
     import command, flight, avoid
     student = command.LayaCommand(model, keys=keys)
     w = World(course, seed)
@@ -283,12 +296,15 @@ def diagnose(course, seed=0, seconds=35.0, model=None, alt=1.6, keys=None):
                    "lidar": avoid.sensor(scene)}
             a = student.answer(eye.last_rgb, ctx)
             cmd = (a["speed"], a["slide"], 0.0, yaw + np.deg2rad(a["turn"]))
-            best, sc = decide(w, t)
-            mujoco.mj_copyData(w.scratch, w.m, w.d)
-            ps = w.pilot_state()
-            s_student = rollout(w, cmd, t)
-            mujoco.mj_copyData(w.d, w.m, w.scratch)
-            w.set_pilot_state(ps)
+            if score:
+                best, sc = decide(w, t)
+                mujoco.mj_copyData(w.scratch, w.m, w.d)
+                ps = w.pilot_state()
+                s_student = rollout(w, cmd, t)
+                mujoco.mj_copyData(w.d, w.m, w.scratch)
+                w.set_pilot_state(ps)
+            else:
+                best, sc, s_student = (0.0, 0.0, 0.0), [0.0], 0.0
             w._sp = None
             rv = w.c.rover_pose(t)
             to_rover = float(np.arctan2(rv[1] - pos[1], rv[0] - pos[0]))
@@ -301,6 +317,8 @@ def diagnose(course, seed=0, seconds=35.0, model=None, alt=1.6, keys=None):
                          "score_median": round(float(np.median(sc)), 1),
                          "n_safe": int(sum(s > -500 for s in sc))})
             prev = (a["speed"], a["turn"])
+        if snapshots is not None and i % SNAP_EVERY == 0:
+            snapshots.append(_snap(w, t, hits, eye))
         hit = w.step(cmd, t, i % per)
         if hit is not None and hit not in hit_objs:
             hit_objs.add(hit)
@@ -429,7 +447,8 @@ def _features(w, t, cmd, lidar):
             "choice": {"speed": float(cmd[0]), "slide": float(cmd[1]), "turn": round(turn, 1)}}
 
 
-def fly(course, seed=0, seconds=60.0, alt=1.6, path=True, record=False, decode="best", features=False):
+def fly(course, seed=0, seconds=60.0, alt=1.6, path=True, record=False, decode="best", features=False,
+        snapshots=None):
     """The teacher flies the course itself (the ceiling check). -> an episode-like result dict. `path`: score
     the path distance on a NavGrid (else the straight-line distance, the first version). `record`: also render
     the onboard camera and lidar at every decision (flight.Eye) and return out["samples"]: per decision the JPEG
@@ -486,6 +505,8 @@ def fly(course, seed=0, seconds=60.0, alt=1.6, path=True, record=False, decode="
                               "n_safe": int(sum(s > -500 for s in sc))})
             if features:
                 decisions[-1]["feat"] = _features(w, t, cmd, lidar)
+        if snapshots is not None and i % SNAP_EVERY == 0:
+            snapshots.append(_snap(w, t, hits, eye))
         hit = w.step(cmd, t, i % per)
         if hit is not None and hit not in hit_objs:
             hit_objs.add(hit)

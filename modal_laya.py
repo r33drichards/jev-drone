@@ -1909,3 +1909,70 @@ def realtest_samples(preds_dir: str, frames: str, wording: str = "target", set_n
         path = os.path.join(HERE, out, n.rsplit(".", 1)[0] + ".png")
         open(path, "wb").write(png)
         print("wrote", path, len(png) // 1024, "KB")
+
+
+def _best_gif(kind, course, seed, seconds, model, noprev, scale):
+    import teacher, flightgif, command
+    snaps = []
+    if kind == "teacher":
+        r = teacher.fly(course, seed, seconds, snapshots=snaps)
+        who = "lookahead teacher (privileged)"
+        summary = "%s  |  rover in view %.0f%%  |  collisions %d" % (
+            "finished" if r["ok"] else "not finished", r["target_visible_pct"], r["collisions"])
+    else:
+        r = teacher.diagnose(course, seed, seconds, model, keys=command.CMD_KEYS_NOPREV if noprev else None,
+                             score=False, snapshots=snaps)
+        who = "Laya %s (flies itself)" % os.path.basename(os.path.dirname(model.rstrip("/")))
+        summary = "rover in view %.0f%%  |  collisions %d" % (r["target_visible_pct"], r["collisions"])
+    title = "%s  |  %s seed %d  |  %s  |  1x" % (who.split(" (")[0], course, seed, summary)
+    gif = flightgif.make_gif(snaps, course, seed, title, directory=".", tactics_label=None, who={"pursuit": who},
+                             realtime=True, scale=scale)
+    return gif, {k: v for k, v in r.items() if k not in ("decisions", "decision_log", "samples")}
+
+
+@app.function(cpu=4, memory=8192, timeout=3 * 60 * 60)
+def best_gif_cpu(kind: str, course: str, seed: int, seconds: float, model: str = "", noprev: bool = False,
+                 scale: float = 0.6):
+    _enter()
+    return _best_gif(kind, course, seed, seconds, model, noprev, scale)
+
+
+@app.function(gpu=["L4", "A10G"], cpu=4, memory=16384, timeout=60 * 60, max_containers=GPU_MAX,
+              volumes={"/cache/hf": hf_vol, "/ckpt": ckpt_vol.read_only()})
+def best_gif_gpu(kind: str, course: str, seed: int, seconds: float, model: str = "", noprev: bool = False,
+                 scale: float = 0.6):
+    os.environ["MUJOCO_GL"] = os.environ["PYOPENGL_PLATFORM"] = "egl"
+    _enter()
+    return _best_gif(kind, course, seed, seconds, model, noprev, scale)
+
+
+BEST_RUNS = [
+    ("teacher", "town-x4", 0, 60.0, "", False), ("teacher", "city-x4", 0, 90.0, "", False),
+    ("teacher", "mixed-x4", 0, 35.0, "", False), ("teacher", "pockets-x4", 0, 35.0, "", False),
+    ("student", "town-x4", 1, 25.0, "/ckpt/smolvlm/drone-rover-v3.7-noprev/best", True),
+    ("student", "pockets-x4", 1, 25.0, "/ckpt/smolvlm/drone-rover-v3.8-prevdrop/best", False),
+    ("student", "town-x4", 0, 25.0, "/ckpt/smolvlm/drone-rover-v3.8-prevdrop/best", False),
+]
+
+
+@app.local_entrypoint()
+def best_gifs():
+    """Real-time (1x) GIFs of the best runs so far: the teacher on four 4x courses, and the best student flights
+    (re-flown in the teacher's world without its scoring) -> results/gifs-best/<timestamp>/."""
+    d = os.path.join(HERE, "results", "gifs-best", time.strftime("%Y%m%d-%H%M%S"))
+    os.makedirs(d, exist_ok=True)
+    calls = [(best_gif_cpu if k == "teacher" else best_gif_gpu).spawn(k, c, s, sec, m, npv)
+             for k, c, s, sec, m, npv in BEST_RUNS]
+    for (k, c, s, sec, m, npv), fc in zip(BEST_RUNS, calls):
+        r = _get(fc)
+        if isinstance(r, Exception):
+            print("FAILED", k, c, s, repr(r)[:300], flush=True)
+            continue
+        gif, res = r
+        tag = "teacher" if k == "teacher" else os.path.basename(os.path.dirname(m.rstrip("/")))
+        name = "%s-%s-seed%d.gif" % (tag, c, s)
+        open(os.path.join(d, name), "wb").write(gif)
+        with open(os.path.join(d, "runs.jsonl"), "a") as f:
+            f.write(json.dumps(dict(res, gif=name), default=float) + "\n")
+        print("wrote", name, "%.1f MB" % (len(gif) / 1e6), flush=True)
+    print("wrote", d)
