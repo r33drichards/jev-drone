@@ -315,7 +315,7 @@ def diagnose(course, seed=0, seconds=35.0, model=None, alt=1.6, keys=None, score
                                      "turn": round(float(np.rad2deg(_wrap(to_rover + np.deg2rad(best[2]) - yaw))), 1)},
                          "score_student": round(s_student, 1), "score_best": round(float(max(sc)), 1),
                          "score_median": round(float(np.median(sc)), 1),
-                         "n_safe": int(sum(s > -500 for s in sc))})
+                         "n_safe": int(sum(s > -500 for s in sc)), "hits_so_far": hits})
             prev = (a["speed"], a["turn"])
         if snapshots is not None and i % SNAP_EVERY == 0:
             snapshots.append(_snap(w, t, hits, eye))
@@ -323,7 +323,10 @@ def diagnose(course, seed=0, seconds=35.0, model=None, alt=1.6, keys=None, score
         if hit is not None and hit not in hit_objs:
             hit_objs.add(hit)
             hits += 1
+    first = next((r["t"] for r in rows if r.get("hits_so_far", 0) > 0), None)
+    clean = [r for r in rows if first is None or r["t"] < first]
     return {"course": course, "seed": seed, "model": model, "collisions": hits, "decisions": rows,
+            "first_hit_s": first, "clean_view_s": round(DECIDE_S * sum(r["visible"] for r in clean), 2),
             "target_visible_pct": round(100 * float(np.mean([r["visible"] for r in rows])), 1),
             "wall_s": round(time.time() - wall0, 1)}
 
@@ -338,7 +341,9 @@ def rl_fly(course, seed=0, seconds=30.0, model=None, sample_seed=0, temp=1.0, al
     probabilities (sharpened or flattened by `temp`), and every decision interval (DECIDE_S) earns a verifiable
     reward from the simulator: rover in view at its end (RL_W visible), standoff within RL_BAND_M (band), new
     collisions (hit), a crash that ends the flight (crash), and potential-based shaping on the path distance round
-    walls to the rover (NavGrid; path x the metres closed, which leaves the optimal policy unchanged). -> dict with
+    walls to the rover (NavGrid; path x the metres closed, which leaves the optimal policy unchanged). The first
+    collision ends the rollout (with the crash penalty): a drone wedged in a wall with the rover in sight must not
+    keep earning the view. -> dict with
     per-decision samples (JPEG, context, taken level indices, reward, reward components) and a summary."""
     import io, command, flight, avoid
     from PIL import Image
@@ -390,6 +395,8 @@ def rl_fly(course, seed=0, seconds=30.0, model=None, sample_seed=0, temp=1.0, al
             if hit is not None and hit not in hit_objs:
                 hit_objs.add(hit)
                 new_hits += 1
+                crashed_at = (i + j) * DT       # a collision ends the rollout: no credit for a view from a wall
+                break
             if w.d.qpos[2] < 0.35:
                 grounded += 1
                 if grounded > 750:
@@ -400,6 +407,7 @@ def rl_fly(course, seed=0, seconds=30.0, model=None, sample_seed=0, temp=1.0, al
         i += per
         t_end = i * DT
         seen, dist = w.sees_rover(t_end)
+        seen = seen and crashed_at is None
         phi_next = potential(t_end)
         comp = {"visible": float(seen), "band": float(RL_BAND_M[0] <= dist <= RL_BAND_M[1]),
                 "hit": float(new_hits), "crash": float(crashed_at is not None), "path": 0.0}
@@ -412,7 +420,10 @@ def rl_fly(course, seed=0, seconds=30.0, model=None, sample_seed=0, temp=1.0, al
         samples.append({"t": round(t, 2), "jpeg": buf.getvalue(), "context": ctx, "take": take, "probs": p,
                         "reward": round(float(r), 3), "components": comp})
         prev = (val["cmd_speed"], val["cmd_turn"])
+    clean_s = len(samples) * DECIDE_S
     return {"course": course, "seed": seed, "sample_seed": sample_seed, "model": model, "temp": temp,
+            "clean_s": round(clean_s, 2), "clean_view_s": round(DECIDE_S * sum(s["components"]["visible"]
+                                                                               for s in samples), 2),
             "return": round(float(sum(s["reward"] for s in samples)), 2), "collisions": hits_total,
             "crashed_at_s": crashed_at, "visible_pct": round(100 * float(np.mean([s["components"]["visible"]
                                                                                   for s in samples])), 1),
