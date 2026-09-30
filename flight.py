@@ -32,6 +32,10 @@ class Pilot:
         self.max_acc = 7.5            # slew the velocity command; step changes tumble it
         self.lat_acc = 35.0           # lateral slew (reversals are the tumble risk)
         self.airmode = True           # torque-priority mixing; see _mix below
+        # yaw scaled down first, so a yaw demand never adds lift. Off: it stopped the ballooning (max 3.2 m vs 23 m)
+        # but starved the heading of authority, and Laya-steered flights lost the rover (hybrid 24/48 vs 39/48,
+        # results/laya/20260929-015224)
+        self.yaw_desat = False
         self.b3_rate = np.deg2rad(10000.0) # attitude-target slewing destabilises it
         self.recovering = False
         self.b3_prev = None
@@ -128,6 +132,21 @@ class Pilot:
         f_lift = np.full(4, thrust / 4.0)
         f_tau = self.mix_inv @ np.array([0.0, tau[0], tau[1], tau[2]])
         f = f_lift + f_tau
+        if self.airmode and self.yaw_desat:
+            # Yaw has the least authority on a quad, so a hard yaw demand at low collective (a commanded
+            # descent sets az to 0.35 G) drives motors negative, and the collective shift below then turns
+            # it into lift: a Laya-steered drone swinging its heading climbed to 6-12 m against a descent
+            # command. Give yaw the lowest priority: keep roll/pitch whole, scale the yaw torque down to what
+            # fits between 0 and f_max, and only then shift the collective for roll/pitch.
+            f0 = f_lift + self.mix_inv @ np.array([0.0, tau[0], tau[1], 0.0])
+            f_y = self.mix_inv @ np.array([0.0, 0.0, 0.0, tau[2]])
+            k = 1.0
+            for fi, yi in zip(f0, f_y):
+                if yi < 0.0:
+                    k = min(k, max(fi, 0.0) / -yi)
+                elif yi > 0.0:
+                    k = min(k, max(self.f_max - fi, 0.0) / yi)
+            f = f0 + max(k, 0.0) * f_y
         if self.airmode:
             # Torque priority ("airmode"): shift the collective so the torque the
             # attitude loop asked for survives. Starving torque to protect thrust is
@@ -151,6 +170,89 @@ class Pilot:
 # --------------------------------------------------------------------------- #
 # perception
 # --------------------------------------------------------------------------- #
+class Lidar:
+    """A 360-degree scanning 2D lidar at the drone's centre, specified like a small spinning unit (RPLidar /
+    Slamtec class): N_BEAMS horizontal rays (1 degree), RANGE_M reach, +-NOISE multiplicative range noise from a
+    seeded stream, HZ scans a second. Rays are cast against the scene geometry (mj_ray, the drone's own body
+    excluded). scan() -> per-beam ranges (m; beam 0 on the nose, counter-clockwise = to the left).
+    summary() is what Laya reads: the nearest return in each of N_SECTORS sectors round the drone."""
+    N_BEAMS = 360
+    RANGE_M = 20.0
+    NOISE = 0.02
+    HZ = 10.0
+    N_SECTORS = 24                # 15-degree sectors
+    HALF_WIDTH_M = 0.75           # the drone's half-width (0.35 m) plus a 0.4 m margin: the swept strip
+
+    def __init__(self, model, seed=0):
+        self.m = model
+        self.body = model.body("x2").id
+        self.ang = np.arange(self.N_BEAMS) * (2 * np.pi / self.N_BEAMS)
+        self.rng = np.random.default_rng([seed, 5099])
+        self.last = np.full(self.N_BEAMS, self.RANGE_M)
+        self.last_t = -1e9
+        self.yaw = 0.0
+
+    def scan(self, data, pos, yaw, t=None):
+        """A new scan at most HZ times a (sim) second; between scans the last one stands (re-referenced to the
+        yaw it was taken at by the caller's summary)."""
+        if t is not None and t - self.last_t < 1.0 / self.HZ - 1e-6:
+            return self.last
+        out = np.full(self.N_BEAMS, self.RANGE_M)
+        gid = np.array([-1], dtype=np.int32)
+        p = np.asarray(pos, dtype=float).copy()
+        for i, a in enumerate(self.ang):
+            v = np.array([np.cos(yaw + a), np.sin(yaw + a), 0.0])
+            r = mujoco.mj_ray(self.m, data, p, v, None, 1, self.body, gid)
+            if 0 <= r < self.RANGE_M:
+                out[i] = r
+        out = np.minimum(out * (1.0 + self.NOISE * self.rng.standard_normal(self.N_BEAMS)), self.RANGE_M)
+        self.last = np.maximum(out, 0.05)
+        self.last_t = t if t is not None else self.last_t
+        self.yaw = float(yaw)
+        return self.last
+
+    def summary(self, yaw=None):
+        """{"sectors": [N_SECTORS nearest returns, from dead ahead counter-clockwise (index 0 centred on the nose,
+        6 = left, 12 = behind, 18 = right)], "yaw_age_deg": how far the drone has turned since the scan}."""
+        a = self.ang
+        k = np.round(a / (2 * np.pi / self.N_SECTORS)).astype(int) % self.N_SECTORS
+        sec = [round(float(self.last[k == i].min()), 1) for i in range(self.N_SECTORS)]
+        return {"sectors": sec}
+
+    def points(self):
+        """The last scan as (x forward, y left) points in the frame the scan was taken in, with the ranges."""
+        return self.last * np.cos(self.ang), self.last * np.sin(self.ang), self.last
+
+
+def _seg_render(r):
+    """Geom ids per pixel from a segmentation Renderer. mujoco's render() indexes a table sized by the scene's
+    geoms with every pixel's decoded id, and now and then (a big scene like the city, EGL) a pixel decodes past
+    it and the flight dies with an IndexError; this redoes the same readout with those pixels as background."""
+    try:
+        return r.render()[:, :, 0]
+    except IndexError:
+        if r._gl_context:
+            r._gl_context.make_current()
+        buf = np.empty((r.height, r.width, 3), dtype=np.uint8)
+        flags = r._scene.flags.copy()
+        r._scene.flags[mujoco.mjtRndFlag.mjRND_SEGMENT] = True
+        r._scene.flags[mujoco.mjtRndFlag.mjRND_IDCOLOR] = True
+        mujoco.mjr_render(r._rect, r._scene, r._mjr_context)
+        mujoco.mjr_readPixels(buf, None, r._rect, r._mjr_context)
+        np.copyto(r._scene.flags, flags)
+        b = buf.astype(np.int64)
+        segid = b[:, :, 0] + b[:, :, 1] * 256 + b[:, :, 2] * 65536
+        n = r._scene.ngeom
+        table = np.full(n + 1, -1, dtype=np.int32)
+        for g in r._scene.geoms[:n]:
+            if g.segid != -1:
+                table[g.segid + 1] = g.objid
+        out = np.full(segid.shape, -1, dtype=np.int32)
+        ok = segid <= n
+        out[ok] = table[segid[ok]]
+        return np.flipud(out) if r._gl_context else out
+
+
 class Eye:
     """Onboard forward camera -> symbolic scene summary.
 
@@ -177,7 +279,7 @@ class Eye:
 
     def __init__(self, model, target_body="rover", ignore_below=IGNORE_BELOW_DEFAULT,
                  floor_geom="floor", shell=(), threat_fov=None, n_sectors=None,
-                 walls=()):
+                 walls=(), rgb_size=None):
         self.ignore_below = ignore_below
         # The tunnel shell is the environment, not an obstacle. Reported separately
         # as clearances, or it swamps every sector and the scene says nothing.
@@ -187,10 +289,15 @@ class Eye:
         self.shell_ids = np.array([model.geom(n).id for n in shell], dtype=int)
         self.wall_ids = [model.geom(n).id for n in walls]   # (left, right)
         self.m = model
+        self.lidar = Lidar(model)            # the 360-degree scanning lidar, one scan per camera frame
         self.depth = mujoco.Renderer(model, self.H, self.W)
         self.depth.enable_depth_rendering()
         self.seg = mujoco.Renderer(model, self.H, self.W)
         self.seg.enable_segmentation_rendering()
+        # Optional colour frame from the same camera, for a decision model that can see.
+        # Not used by the symbolic scene; rendered only when asked for.
+        self.rgb = mujoco.Renderer(model, rgb_size[1], rgb_size[0]) if rgb_size else None
+        self.last_rgb = None
         self.cam = mujoco.MjvCamera()
         self.cam.type = mujoco.mjtCamera.mjCAMERA_FREE
         self.cam.distance = 1.0
@@ -235,7 +342,10 @@ class Eye:
         self.depth.update_scene(data, self.cam)
         z = np.clip(self.depth.render(), 0.0, self.MAX_RANGE)
         self.seg.update_scene(data, self.cam)
-        seg = self.seg.render()[:, :, 0]
+        seg = _seg_render(self.seg)
+        if self.rgb is not None:
+            self.rgb.update_scene(data, self.cam)
+            self.last_rgb = self.rgb.render()
 
         # --- free space: ignore the floor, keep only real vertical obstructions
         obstacle = (seg != self.floor_id) & (seg >= 0)
@@ -350,6 +460,8 @@ class Eye:
                 "nearest_obstacle_m": round(nearest, 2),
                 "nearest_bearing_deg": nearest_brg,
                 "target": target}
+        self.lidar.scan(data, pos, yaw, t)
+        out["lidar"] = self.lidar.summary()
         return out
 
     def _bearing_arr(self, cols):

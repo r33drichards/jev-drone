@@ -1,0 +1,55 @@
+{
+ "decisions": 4720,
+ "flights": 24,
+ "obs": {
+  "turn": {
+   "majority": 0.269,
+   "softmax": 0.366,
+   "knn": 0.447
+  },
+  "speed": {
+   "majority": 0.378,
+   "softmax": 0.54,
+   "knn": 0.591
+  },
+  "slide": {
+   "majority": 0.369,
+   "softmax": 0.655,
+   "knn": 0.695
+  }
+ },
+ "obs+memory": {
+  "turn": {
+   "majority": 0.269,
+   "softmax": 0.372,
+   "knn": 0.463
+  },
+  "speed": {
+   "majority": 0.378,
+   "softmax": 0.539,
+   "knn": 0.6
+  },
+  "slide": {
+   "majority": 0.369,
+   "softmax": 0.654,
+   "knn": 0.696
+  }
+ },
+ "obs+priv": {
+  "turn": {
+   "majority": 0.269,
+   "softmax": 0.447,
+   "knn": 0.455
+  },
+  "speed": {
+   "majority": 0.378,
+   "softmax": 0.554,
+   "knn": 0.605
+  },
+  "slide": {
+   "majority": 0.369,
+   "softmax": 0.719,
+   "knn": 0.714
+  }
+ }
+}

@@ -1,0 +1,121 @@
+{
+ "frames": 4541,
+ "lost_frames": 1186,
+ "occluded_auc_lost": 0.6242386864743729,
+ "occluded_auc_all": 0.910155468506174,
+ "occluded_true_lost": 232,
+ "occluded_acc_lost": 0.8018549747048904,
+ "occluded_majority_lost": 0.8043844856661045,
+ "reappear_lost": {
+  "n": 1186,
+  "acc": 0.49325463743676223,
+  "majority_baseline": 0.5337268128161888,
+  "truth_counts": {
+   "left": 271,
+   "ahead": 101,
+   "right": 181,
+   "behind": 633
+  },
+  "confusion": {
+   "left": {
+    "left": 61,
+    "ahead": 2,
+    "right": 27,
+    "behind": 181
+   },
+   "ahead": {
+    "left": 22,
+    "ahead": 6,
+    "right": 18,
+    "behind": 55
+   },
+   "right": {
+    "left": 41,
+    "ahead": 5,
+    "right": 38,
+    "behind": 97
+   },
+   "behind": {
+    "left": 97,
+    "ahead": 6,
+    "right": 50,
+    "behind": 480
+   }
+  }
+ },
+ "reappear_visible": {
+  "n": 3355,
+  "acc": 0.7627421758569299,
+  "majority_baseline": 0.4834575260804769,
+  "truth_counts": {
+   "left": 835,
+   "ahead": 1622,
+   "right": 894,
+   "behind": 4
+  },
+  "confusion": {
+   "left": {
+    "left": 694,
+    "ahead": 126,
+    "right": 15,
+    "behind": 0
+   },
+   "ahead": {
+    "left": 264,
+    "ahead": 1081,
+    "right": 277,
+    "behind": 0
+   },
+   "right": {
+    "left": 2,
+    "ahead": 107,
+    "right": 784,
+    "behind": 1
+   },
+   "behind": {
+    "left": 3,
+    "ahead": 0,
+    "right": 1,
+    "behind": 0
+   }
+  }
+ },
+ "reappear_eta": {
+  "n": 1186,
+  "acc": 0.7251264755480608,
+  "majority_baseline": 0.7327150084317032,
+  "within_one": 0.7419898819561551,
+  "spearman_expected_vs_true_s": 0.08901203759090359,
+  "mae_s_capped15": 4.927482595897847,
+  "truth_counts": [
+   869,
+   5,
+   0,
+   312
+  ],
+  "pred_counts": [
+   1137,
+   1,
+   17,
+   31
+  ]
+ },
+ "maneuver": {
+  "n": 1165,
+  "acc": 0.9991416309012876,
+  "majority_baseline": 1.0,
+  "climb_recall": null,
+  "climb_precision": 0.0,
+  "climb_auc": null,
+  "confusion": {
+   "hold_course": {
+    "hold_course": 1164,
+    "gap_left": 0,
+    "gap_right": 0,
+    "climb": 1,
+    "brake": 0,
+    "reacquire": 0
+   }
+  }
+ }
+}

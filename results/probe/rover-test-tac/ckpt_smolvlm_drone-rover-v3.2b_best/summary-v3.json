@@ -1,0 +1,218 @@
+{
+ "frames": 2098,
+ "lost_frames": 677,
+ "occluded_auc_lost": 0.9935995903737839,
+ "occluded_auc_all": 0.9983847693525113,
+ "occluded_true_lost": 558,
+ "occluded_acc_lost": 0.9719350073855244,
+ "occluded_majority_lost": 0.8242245199409158,
+ "reappear_lost": {
+  "n": 677,
+  "acc": 0.8906942392909897,
+  "majority_baseline": 0.40620384047267355,
+  "truth_counts": {
+   "left": 88,
+   "ahead": 275,
+   "right": 224,
+   "behind": 90
+  },
+  "confusion": {
+   "left": {
+    "left": 70,
+    "ahead": 7,
+    "right": 5,
+    "behind": 6
+   },
+   "ahead": {
+    "left": 8,
+    "ahead": 242,
+    "right": 23,
+    "behind": 2
+   },
+   "right": {
+    "left": 5,
+    "ahead": 7,
+    "right": 210,
+    "behind": 2
+   },
+   "behind": {
+    "left": 7,
+    "ahead": 0,
+    "right": 2,
+    "behind": 81
+   }
+  }
+ },
+ "reappear_visible": {
+  "n": 1421,
+  "acc": 0.7959183673469388,
+  "majority_baseline": 0.7220267417311752,
+  "truth_counts": {
+   "left": 241,
+   "ahead": 1026,
+   "right": 154,
+   "behind": 0
+  },
+  "confusion": {
+   "left": {
+    "left": 128,
+    "ahead": 104,
+    "right": 9,
+    "behind": 0
+   },
+   "ahead": {
+    "left": 54,
+    "ahead": 928,
+    "right": 44,
+    "behind": 0
+   },
+   "right": {
+    "left": 2,
+    "ahead": 77,
+    "right": 75,
+    "behind": 0
+   }
+  }
+ },
+ "reappear_eta": {
+  "n": 677,
+  "acc": 0.896602658788774,
+  "majority_baseline": 0.413589364844904,
+  "within_one": 0.9379615952732644,
+  "spearman_expected_vs_true_s": 0.7524593598923448,
+  "mae_s_capped15": 2.164202731754562,
+  "truth_counts": [
+   130,
+   53,
+   214,
+   280
+  ],
+  "pred_counts": [
+   163,
+   45,
+   209,
+   260
+  ]
+ },
+ "maneuver": {
+  "n": 2098,
+  "acc": 0.9065776930409915,
+  "majority_baseline": 0.8732125834127741,
+  "climb_recall": 0.2669172932330827,
+  "climb_precision": 1.0,
+  "climb_auc": 0.954105378074006,
+  "confusion": {
+   "hold_course": {
+    "hold_course": 1831,
+    "gap_left": 0,
+    "gap_right": 0,
+    "climb": 0,
+    "brake": 0,
+    "reacquire": 1
+   },
+   "climb": {
+    "hold_course": 192,
+    "gap_left": 0,
+    "gap_right": 0,
+    "climb": 71,
+    "brake": 3,
+    "reacquire": 0
+   }
+  }
+ },
+ "maneuver_tac": {
+  "n": 2098,
+  "truth_climb": 266,
+  "by_station": {
+   "beam": {
+    "n": 532,
+    "truth_climb": 266,
+    "argmax_climb_rate": 0.13345864661654136,
+    "mean_p_climb_truth_climb": 0.17707669172932333,
+    "mean_p_climb_truth_hold": 0.025992105263157893
+   },
+   "decoy": {
+    "n": 112,
+    "truth_climb": 0,
+    "argmax_climb_rate": 0.0,
+    "mean_p_climb_truth_climb": null,
+    "mean_p_climb_truth_hold": 0.055241964285714276
+   },
+   "none": {
+    "n": 423,
+    "truth_climb": 0,
+    "argmax_climb_rate": 0.0,
+    "mean_p_climb_truth_climb": null,
+    "mean_p_climb_truth_hold": 0.03310354609929078
+   },
+   "pocket": {
+    "n": 1031,
+    "truth_climb": 0,
+    "argmax_climb_rate": 0.0,
+    "mean_p_climb_truth_climb": null,
+    "mean_p_climb_truth_hold": 0.042703491755577104
+   }
+  },
+  "argmax": {
+   "recall": 0.2669172932330827,
+   "precision": 1.0,
+   "f1": 0.42136498516320475,
+   "n_pred_climb": 71,
+   "climb_recall_beams": 0.2669172932330827,
+   "false_climb_pocket": 0.0,
+   "false_climb_other": 0.0
+  },
+  "climb_recall_beams": 0.2669172932330827,
+  "false_climb_pocket": 0.0,
+  "beam_vs_pocket_auc": 0.9483182981702558,
+  "climb_auc": 0.954105378074006,
+  "best_threshold": {
+   "recall": 0.8233082706766918,
+   "precision": 0.7348993288590604,
+   "f1": 0.7765957446808511,
+   "n_pred_climb": 298,
+   "climb_recall_beams": 0.8233082706766918,
+   "false_climb_pocket": 0.049466537342386034,
+   "false_climb_other": 0.03495630461922597,
+   "threshold": 0.1472
+  },
+  "at_thresholds": {
+   "0.12": {
+    "recall": 0.8609022556390977,
+    "precision": 0.6542857142857142,
+    "f1": 0.7435064935064934,
+    "n_pred_climb": 350,
+    "climb_recall_beams": 0.8609022556390977,
+    "false_climb_pocket": 0.07856450048496605,
+    "false_climb_other": 0.049937578027465665
+   },
+   "0.2": {
+    "recall": 0.21052631578947367,
+    "precision": 0.6086956521739131,
+    "f1": 0.3128491620111732,
+    "n_pred_climb": 92,
+    "climb_recall_beams": 0.21052631578947367,
+    "false_climb_pocket": 0.01745877788554801,
+    "false_climb_other": 0.02247191011235955
+   },
+   "0.3": {
+    "recall": 0.03383458646616541,
+    "precision": 0.8181818181818182,
+    "f1": 0.06498194945848375,
+    "n_pred_climb": 11,
+    "climb_recall_beams": 0.03383458646616541,
+    "false_climb_pocket": 0.0009699321047526673,
+    "false_climb_other": 0.0012484394506866417
+   },
+   "0.5": {
+    "recall": 0.007518796992481203,
+    "precision": 1.0,
+    "f1": 0.014925373134328356,
+    "n_pred_climb": 2,
+    "climb_recall_beams": 0.007518796992481203,
+    "false_climb_pocket": 0.0,
+    "false_climb_other": 0.0
+   }
+  }
+ }
+}

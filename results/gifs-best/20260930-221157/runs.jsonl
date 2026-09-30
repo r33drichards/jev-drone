@@ -1,0 +1,5 @@
+{"course": "town-x4", "seed": 1, "model": "/ckpt/smolvlm/drone-rover-v3.7-noprev/best", "collisions": 3, "target_visible_pct": 52.0, "wall_s": 10.2, "gif": "drone-rover-v3.7-noprev-town-x4-seed1.gif"}
+{"course": "pockets-x4", "seed": 1, "model": "/ckpt/smolvlm/drone-rover-v3.8-prevdrop/best", "collisions": 4, "target_visible_pct": 29.0, "wall_s": 13.4, "gif": "drone-rover-v3.8-prevdrop-pockets-x4-seed1.gif"}
+{"course": "tactics-x4", "seed": 101, "sample_seed": 2, "model": "/ckpt/smolvlm/drone-rover-rl1/last", "temp": 1.0, "return": 27.69, "collisions": 3, "crashed_at_s": 11.59, "visible_pct": 66.0, "wall_s": 22.0, "gif": "drone-rover-rl1-tactics-x4-seed101-sample2.gif"}
+{"course": "town-x4", "seed": 100, "sample_seed": 1, "model": "/ckpt/smolvlm/drone-rover-rl2/last", "temp": 1.0, "return": 82.04, "collisions": 3, "crashed_at_s": null, "visible_pct": 67.5, "wall_s": 38.3, "gif": "drone-rover-rl2-town-x4-seed100-sample1.gif"}
+{"course": "town-x4", "seed": 0, "model": "/ckpt/smolvlm/drone-rover-v3.5/best", "collisions": 1, "target_visible_pct": 62.0, "wall_s": 10.5, "gif": "drone-rover-v3.5-town-x4-seed0.gif"}

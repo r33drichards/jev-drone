@@ -1,0 +1,46 @@
+{
+ "model": "/ckpt/smolvlm/drone-rover-v3.6/best",
+ "n": 600,
+ "recorded": {
+  "cmd_speed": {
+   "top1": 0.667,
+   "corr_answer_prev": 0.872
+  },
+  "cmd_slide": {
+   "top1": 0.713,
+   "corr_answer_prev": null
+  },
+  "cmd_turn": {
+   "top1": 0.565,
+   "corr_answer_prev": 0.88
+  }
+ },
+ "shuffled": {
+  "cmd_speed": {
+   "top1": 0.477,
+   "corr_answer_prev": 0.63
+  },
+  "cmd_slide": {
+   "top1": 0.682,
+   "corr_answer_prev": null
+  },
+  "cmd_turn": {
+   "top1": 0.358,
+   "corr_answer_prev": 0.555
+  }
+ },
+ "zero": {
+  "cmd_speed": {
+   "top1": 0.465,
+   "corr_answer_prev": null
+  },
+  "cmd_slide": {
+   "top1": 0.685,
+   "corr_answer_prev": null
+  },
+  "cmd_turn": {
+   "top1": 0.35,
+   "corr_answer_prev": null
+  }
+ }
+}

@@ -1,0 +1,184 @@
+{
+ "method": "sequence-level bootstrap (resample the 104 sequences with replacement, 300 times); 90% interval",
+ "n_boot": 300,
+ "zero-shot/rover": {
+  "visible_auc": [
+   0.564,
+   0.63
+  ],
+  "visible_auc_natural_negatives": [
+   0.542,
+   0.705
+  ],
+  "where_acc": [
+   0.187,
+   0.216
+  ],
+  "steer_side_acc": [
+   0.449,
+   0.517
+  ],
+  "steer_spearman_vs_offset": [
+   -0.108,
+   -0.028
+  ],
+  "range_spearman_vs_box": [
+   -0.236,
+   -0.125
+  ],
+  "range_spearman_within_seq_mean": [
+   -0.112,
+   -0.051
+  ]
+ },
+ "zero-shot/target": {
+  "visible_auc": [
+   0.685,
+   0.751
+  ],
+  "visible_auc_natural_negatives": [
+   0.618,
+   0.805
+  ],
+  "where_acc": [
+   0.205,
+   0.238
+  ],
+  "steer_side_acc": [
+   0.444,
+   0.519
+  ],
+  "steer_spearman_vs_offset": [
+   -0.086,
+   0.011
+  ],
+  "range_spearman_vs_box": [
+   -0.145,
+   0.004
+  ],
+  "range_spearman_within_seq_mean": [
+   -0.016,
+   0.051
+  ]
+ },
+ "v2 last/rover": {
+  "visible_auc": [
+   0.512,
+   0.582
+  ],
+  "visible_auc_natural_negatives": [
+   0.571,
+   0.71
+  ],
+  "where_acc": [
+   0.26,
+   0.315
+  ],
+  "steer_side_acc": [
+   0.484,
+   0.562
+  ],
+  "steer_spearman_vs_offset": [
+   0.002,
+   0.106
+  ],
+  "range_spearman_vs_box": [
+   -0.049,
+   0.115
+  ],
+  "range_spearman_within_seq_mean": [
+   -0.104,
+   -0.032
+  ]
+ },
+ "v2 last/target": {
+  "visible_auc": [
+   0.748,
+   0.823
+  ],
+  "visible_auc_natural_negatives": [
+   0.689,
+   0.901
+  ],
+  "where_acc": [
+   0.516,
+   0.578
+  ],
+  "steer_side_acc": [
+   0.645,
+   0.707
+  ],
+  "steer_spearman_vs_offset": [
+   0.311,
+   0.406
+  ],
+  "range_spearman_vs_box": [
+   -0.053,
+   0.131
+  ],
+  "range_spearman_within_seq_mean": [
+   -0.097,
+   -0.024
+  ]
+ },
+ "v3.1 best/rover": {
+  "visible_auc": [
+   0.489,
+   0.551
+  ],
+  "visible_auc_natural_negatives": [
+   0.545,
+   0.675
+  ],
+  "where_acc": [
+   0.263,
+   0.321
+  ],
+  "steer_side_acc": [
+   0.554,
+   0.615
+  ],
+  "steer_spearman_vs_offset": [
+   0.101,
+   0.188
+  ],
+  "range_spearman_vs_box": [
+   -0.034,
+   0.121
+  ],
+  "range_spearman_within_seq_mean": [
+   -0.002,
+   0.062
+  ]
+ },
+ "v3.1 best/target": {
+  "visible_auc": [
+   0.741,
+   0.809
+  ],
+  "visible_auc_natural_negatives": [
+   0.742,
+   0.904
+  ],
+  "where_acc": [
+   0.503,
+   0.565
+  ],
+  "steer_side_acc": [
+   0.622,
+   0.696
+  ],
+  "steer_spearman_vs_offset": [
+   0.262,
+   0.365
+  ],
+  "range_spearman_vs_box": [
+   0.04,
+   0.183
+  ],
+  "range_spearman_within_seq_mean": [
+   0.027,
+   0.083
+  ]
+ }
+}

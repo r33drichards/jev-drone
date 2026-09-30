@@ -1,0 +1,1225 @@
+{
+ "model": "/ckpt/smolvlm/drone-rover-v3.8-prevdrop/best",
+ "courses": "town-x4,mixed-x4,pockets-x4,tactics-x4,no-climb-x4",
+ "seeds": "110,111",
+ "group": 12,
+ "seconds": 30.0,
+ "temp": 1.0,
+ "gamma": 0.95,
+ "reward_weights": {
+  "visible": 1.0,
+  "band": 0.5,
+  "hit": -3.0,
+  "crash": -10.0,
+  "path": 0.2
+ },
+ "band_m": [
+  2.0,
+  8.0
+ ],
+ "rows": 39873,
+ "flights": [
+  {
+   "course": "mixed-x4",
+   "seed": 110,
+   "g": 0,
+   "ret": -2.86,
+   "vis": 8.3,
+   "hits": 3,
+   "crashed": null,
+   "n": 120
+  },
+  {
+   "course": "mixed-x4",
+   "seed": 110,
+   "g": 1,
+   "ret": -1.03,
+   "vis": 38.9,
+   "hits": 3,
+   "crashed": 8.998,
+   "n": 36
+  },
+  {
+   "course": "mixed-x4",
+   "seed": 110,
+   "g": 2,
+   "ret": 19.35,
+   "vis": 17.5,
+   "hits": 3,
+   "crashed": null,
+   "n": 120
+  },
+  {
+   "course": "mixed-x4",
+   "seed": 110,
+   "g": 3,
+   "ret": 22.69,
+   "vis": 25.8,
+   "hits": 4,
+   "crashed": null,
+   "n": 120
+  },
+  {
+   "course": "mixed-x4",
+   "seed": 110,
+   "g": 4,
+   "ret": -0.11,
+   "vis": 11.7,
+   "hits": 2,
+   "crashed": null,
+   "n": 120
+  },
+  {
+   "course": "mixed-x4",
+   "seed": 110,
+   "g": 5,
+   "ret": -7.41,
+   "vis": 9.2,
+   "hits": 2,
+   "crashed": null,
+   "n": 120
+  },
+  {
+   "course": "mixed-x4",
+   "seed": 110,
+   "g": 6,
+   "ret": -13.44,
+   "vis": 7.5,
+   "hits": 4,
+   "crashed": null,
+   "n": 120
+  },
+  {
+   "course": "mixed-x4",
+   "seed": 110,
+   "g": 7,
+   "ret": 5.17,
+   "vis": 14.2,
+   "hits": 4,
+   "crashed": null,
+   "n": 120
+  },
+  {
+   "course": "mixed-x4",
+   "seed": 110,
+   "g": 8,
+   "ret": -12.43,
+   "vis": 19.2,
+   "hits": 5,
+   "crashed": 12.92,
+   "n": 52
+  },
+  {
+   "course": "mixed-x4",
+   "seed": 110,
+   "g": 9,
+   "ret": -2.86,
+   "vis": 7.5,
+   "hits": 2,
+   "crashed": null,
+   "n": 120
+  },
+  {
+   "course": "mixed-x4",
+   "seed": 110,
+   "g": 10,
+   "ret": -5.38,
+   "vis": 10.0,
+   "hits": 5,
+   "crashed": null,
+   "n": 120
+  },
+  {
+   "course": "mixed-x4",
+   "seed": 110,
+   "g": 11,
+   "ret": -2.12,
+   "vis": 12.5,
+   "hits": 2,
+   "crashed": null,
+   "n": 120
+  },
+  {
+   "course": "mixed-x4",
+   "seed": 111,
+   "g": 0,
+   "ret": -6.76,
+   "vis": 7.5,
+   "hits": 3,
+   "crashed": null,
+   "n": 120
+  },
+  {
+   "course": "mixed-x4",
+   "seed": 111,
+   "g": 1,
+   "ret": 1.07,
+   "vis": 37.0,
+   "hits": 3,
+   "crashed": 13.492,
+   "n": 54
+  },
+  {
+   "course": "mixed-x4",
+   "seed": 111,
+   "g": 2,
+   "ret": -5.04,
+   "vis": 36.7,
+   "hits": 4,
+   "crashed": 7.402,
+   "n": 30
+  },
+  {
+   "course": "mixed-x4",
+   "seed": 111,
+   "g": 3,
+   "ret": -0.01,
+   "vis": 53.5,
+   "hits": 5,
+   "crashed": 10.502,
+   "n": 43
+  },
+  {
+   "course": "mixed-x4",
+   "seed": 111,
+   "g": 4,
+   "ret": 20.34,
+   "vis": 20.0,
+   "hits": 5,
+   "crashed": null,
+   "n": 120
+  },
+  {
+   "course": "mixed-x4",
+   "seed": 111,
+   "g": 5,
+   "ret": 3.84,
+   "vis": 15.8,
+   "hits": 3,
+   "crashed": null,
+   "n": 120
+  },
+  {
+   "course": "mixed-x4",
+   "seed": 111,
+   "g": 6,
+   "ret": 22.46,
+   "vis": 29.2,
+   "hits": 4,
+   "crashed": null,
+   "n": 120
+  },
+  {
+   "course": "mixed-x4",
+   "seed": 111,
+   "g": 7,
+   "ret": -4.09,
+   "vis": 38.1,
+   "hits": 4,
+   "crashed": 10.494,
+   "n": 42
+  },
+  {
+   "course": "mixed-x4",
+   "seed": 111,
+   "g": 8,
+   "ret": 2.08,
+   "vis": 6.7,
+   "hits": 2,
+   "crashed": null,
+   "n": 120
+  },
+  {
+   "course": "mixed-x4",
+   "seed": 111,
+   "g": 9,
+   "ret": -0.2,
+   "vis": 13.3,
+   "hits": 2,
+   "crashed": null,
+   "n": 120
+  },
+  {
+   "course": "mixed-x4",
+   "seed": 111,
+   "g": 10,
+   "ret": -8.24,
+   "vis": 10.0,
+   "hits": 4,
+   "crashed": null,
+   "n": 120
+  },
+  {
+   "course": "mixed-x4",
+   "seed": 111,
+   "g": 11,
+   "ret": 38.03,
+   "vis": 38.3,
+   "hits": 3,
+   "crashed": null,
+   "n": 120
+  },
+  {
+   "course": "no-climb-x4",
+   "seed": 110,
+   "g": 0,
+   "ret": 6.01,
+   "vis": 8.3,
+   "hits": 5,
+   "crashed": null,
+   "n": 120
+  },
+  {
+   "course": "no-climb-x4",
+   "seed": 110,
+   "g": 1,
+   "ret": -10.77,
+   "vis": 13.3,
+   "hits": 3,
+   "crashed": 22.43,
+   "n": 90
+  },
+  {
+   "course": "no-climb-x4",
+   "seed": 110,
+   "g": 2,
+   "ret": -14.06,
+   "vis": 14.4,
+   "hits": 4,
+   "crashed": 24.094,
+   "n": 97
+  },
+  {
+   "course": "no-climb-x4",
+   "seed": 110,
+   "g": 3,
+   "ret": -8.12,
+   "vis": 28.6,
+   "hits": 3,
+   "crashed": 8.574,
+   "n": 35
+  },
+  {
+   "course": "no-climb-x4",
+   "seed": 110,
+   "g": 4,
+   "ret": 0.36,
+   "vis": 11.7,
+   "hits": 2,
+   "crashed": null,
+   "n": 120
+  },
+  {
+   "course": "no-climb-x4",
+   "seed": 110,
+   "g": 5,
+   "ret": 0.97,
+   "vis": 16.7,
+   "hits": 6,
+   "crashed": null,
+   "n": 120
+  },
+  {
+   "course": "no-climb-x4",
+   "seed": 110,
+   "g": 6,
+   "ret": -12.37,
+   "vis": 7.5,
+   "hits": 6,
+   "crashed": null,
+   "n": 120
+  },
+  {
+   "course": "no-climb-x4",
+   "seed": 110,
+   "g": 7,
+   "ret": 11.56,
+   "vis": 17.5,
+   "hits": 1,
+   "crashed": null,
+   "n": 120
+  },
+  {
+   "course": "no-climb-x4",
+   "seed": 110,
+   "g": 8,
+   "ret": 4.13,
+   "vis": 12.5,
+   "hits": 3,
+   "crashed": null,
+   "n": 120
+  },
+  {
+   "course": "no-climb-x4",
+   "seed": 110,
+   "g": 9,
+   "ret": -15.06,
+   "vis": 11.2,
+   "hits": 4,
+   "crashed": 24.46,
+   "n": 98
+  },
+  {
+   "course": "no-climb-x4",
+   "seed": 110,
+   "g": 10,
+   "ret": -2.63,
+   "vis": 27.6,
+   "hits": 2,
+   "crashed": 7.13,
+   "n": 29
+  },
+  {
+   "course": "no-climb-x4",
+   "seed": 110,
+   "g": 11,
+   "ret": 11.66,
+   "vis": 13.3,
+   "hits": 2,
+   "crashed": null,
+   "n": 120
+  },
+  {
+   "course": "no-climb-x4",
+   "seed": 111,
+   "g": 0,
+   "ret": 12.45,
+   "vis": 6.7,
+   "hits": 1,
+   "crashed": null,
+   "n": 120
+  },
+  {
+   "course": "no-climb-x4",
+   "seed": 111,
+   "g": 1,
+   "ret": -1.4,
+   "vis": 8.3,
+   "hits": 2,
+   "crashed": null,
+   "n": 120
+  },
+  {
+   "course": "no-climb-x4",
+   "seed": 111,
+   "g": 2,
+   "ret": -5.13,
+   "vis": 10.0,
+   "hits": 3,
+   "crashed": null,
+   "n": 120
+  },
+  {
+   "course": "no-climb-x4",
+   "seed": 111,
+   "g": 3,
+   "ret": 6.3,
+   "vis": 11.7,
+   "hits": 2,
+   "crashed": null,
+   "n": 120
+  },
+  {
+   "course": "no-climb-x4",
+   "seed": 111,
+   "g": 4,
+   "ret": 12.17,
+   "vis": 11.7,
+   "hits": 2,
+   "crashed": null,
+   "n": 120
+  },
+  {
+   "course": "no-climb-x4",
+   "seed": 111,
+   "g": 5,
+   "ret": 12.16,
+   "vis": 15.0,
+   "hits": 1,
+   "crashed": null,
+   "n": 120
+  },
+  {
+   "course": "no-climb-x4",
+   "seed": 111,
+   "g": 6,
+   "ret": -0.6,
+   "vis": 9.2,
+   "hits": 2,
+   "crashed": null,
+   "n": 120
+  },
+  {
+   "course": "no-climb-x4",
+   "seed": 111,
+   "g": 7,
+   "ret": 0.95,
+   "vis": 11.7,
+   "hits": 3,
+   "crashed": null,
+   "n": 120
+  },
+  {
+   "course": "no-climb-x4",
+   "seed": 111,
+   "g": 8,
+   "ret": 3.01,
+   "vis": 13.3,
+   "hits": 2,
+   "crashed": null,
+   "n": 120
+  },
+  {
+   "course": "no-climb-x4",
+   "seed": 111,
+   "g": 9,
+   "ret": 17.23,
+   "vis": 24.2,
+   "hits": 4,
+   "crashed": null,
+   "n": 120
+  },
+  {
+   "course": "no-climb-x4",
+   "seed": 111,
+   "g": 10,
+   "ret": 0.37,
+   "vis": 7.5,
+   "hits": 3,
+   "crashed": null,
+   "n": 120
+  },
+  {
+   "course": "no-climb-x4",
+   "seed": 111,
+   "g": 11,
+   "ret": -11.16,
+   "vis": 12.9,
+   "hits": 4,
+   "crashed": 25.044,
+   "n": 101
+  },
+  {
+   "course": "pockets-x4",
+   "seed": 110,
+   "g": 0,
+   "ret": 7.53,
+   "vis": 11.7,
+   "hits": 1,
+   "crashed": null,
+   "n": 120
+  },
+  {
+   "course": "pockets-x4",
+   "seed": 110,
+   "g": 1,
+   "ret": 28.68,
+   "vis": 31.7,
+   "hits": 6,
+   "crashed": null,
+   "n": 120
+  },
+  {
+   "course": "pockets-x4",
+   "seed": 110,
+   "g": 2,
+   "ret": 24.53,
+   "vis": 20.8,
+   "hits": 5,
+   "crashed": null,
+   "n": 120
+  },
+  {
+   "course": "pockets-x4",
+   "seed": 110,
+   "g": 3,
+   "ret": 17.98,
+   "vis": 18.3,
+   "hits": 1,
+   "crashed": null,
+   "n": 120
+  },
+  {
+   "course": "pockets-x4",
+   "seed": 110,
+   "g": 4,
+   "ret": 11.34,
+   "vis": 15.0,
+   "hits": 1,
+   "crashed": null,
+   "n": 120
+  },
+  {
+   "course": "pockets-x4",
+   "seed": 110,
+   "g": 5,
+   "ret": 14.94,
+   "vis": 13.3,
+   "hits": 1,
+   "crashed": null,
+   "n": 120
+  },
+  {
+   "course": "pockets-x4",
+   "seed": 110,
+   "g": 6,
+   "ret": 21.91,
+   "vis": 20.0,
+   "hits": 1,
+   "crashed": null,
+   "n": 120
+  },
+  {
+   "course": "pockets-x4",
+   "seed": 110,
+   "g": 7,
+   "ret": 9.37,
+   "vis": 20.0,
+   "hits": 3,
+   "crashed": null,
+   "n": 120
+  },
+  {
+   "course": "pockets-x4",
+   "seed": 110,
+   "g": 8,
+   "ret": 8.91,
+   "vis": 11.7,
+   "hits": 3,
+   "crashed": null,
+   "n": 120
+  },
+  {
+   "course": "pockets-x4",
+   "seed": 110,
+   "g": 9,
+   "ret": 27.53,
+   "vis": 22.5,
+   "hits": 2,
+   "crashed": null,
+   "n": 120
+  },
+  {
+   "course": "pockets-x4",
+   "seed": 110,
+   "g": 10,
+   "ret": -1.44,
+   "vis": 8.3,
+   "hits": 1,
+   "crashed": null,
+   "n": 120
+  },
+  {
+   "course": "pockets-x4",
+   "seed": 110,
+   "g": 11,
+   "ret": 11.78,
+   "vis": 15.0,
+   "hits": 2,
+   "crashed": null,
+   "n": 120
+  },
+  {
+   "course": "pockets-x4",
+   "seed": 111,
+   "g": 0,
+   "ret": 9.58,
+   "vis": 9.2,
+   "hits": 2,
+   "crashed": null,
+   "n": 120
+  },
+  {
+   "course": "pockets-x4",
+   "seed": 111,
+   "g": 1,
+   "ret": 29.88,
+   "vis": 29.2,
+   "hits": 2,
+   "crashed": null,
+   "n": 120
+  },
+  {
+   "course": "pockets-x4",
+   "seed": 111,
+   "g": 2,
+   "ret": 23.98,
+   "vis": 25.8,
+   "hits": 3,
+   "crashed": null,
+   "n": 120
+  },
+  {
+   "course": "pockets-x4",
+   "seed": 111,
+   "g": 3,
+   "ret": 22.97,
+   "vis": 19.2,
+   "hits": 4,
+   "crashed": null,
+   "n": 120
+  },
+  {
+   "course": "pockets-x4",
+   "seed": 111,
+   "g": 4,
+   "ret": 7.11,
+   "vis": 15.0,
+   "hits": 7,
+   "crashed": null,
+   "n": 120
+  },
+  {
+   "course": "pockets-x4",
+   "seed": 111,
+   "g": 5,
+   "ret": 19.28,
+   "vis": 22.5,
+   "hits": 2,
+   "crashed": null,
+   "n": 120
+  },
+  {
+   "course": "pockets-x4",
+   "seed": 111,
+   "g": 6,
+   "ret": 100.94,
+   "vis": 75.0,
+   "hits": 3,
+   "crashed": null,
+   "n": 120
+  },
+  {
+   "course": "pockets-x4",
+   "seed": 111,
+   "g": 7,
+   "ret": 10.32,
+   "vis": 18.3,
+   "hits": 4,
+   "crashed": null,
+   "n": 120
+  },
+  {
+   "course": "pockets-x4",
+   "seed": 111,
+   "g": 8,
+   "ret": 5.24,
+   "vis": 16.7,
+   "hits": 4,
+   "crashed": null,
+   "n": 120
+  },
+  {
+   "course": "pockets-x4",
+   "seed": 111,
+   "g": 9,
+   "ret": 61.45,
+   "vis": 45.0,
+   "hits": 3,
+   "crashed": null,
+   "n": 120
+  },
+  {
+   "course": "pockets-x4",
+   "seed": 111,
+   "g": 10,
+   "ret": 19.88,
+   "vis": 24.2,
+   "hits": 3,
+   "crashed": null,
+   "n": 120
+  },
+  {
+   "course": "pockets-x4",
+   "seed": 111,
+   "g": 11,
+   "ret": 17.46,
+   "vis": 22.5,
+   "hits": 2,
+   "crashed": null,
+   "n": 120
+  },
+  {
+   "course": "tactics-x4",
+   "seed": 110,
+   "g": 0,
+   "ret": 11.68,
+   "vis": 13.3,
+   "hits": 1,
+   "crashed": null,
+   "n": 120
+  },
+  {
+   "course": "tactics-x4",
+   "seed": 110,
+   "g": 1,
+   "ret": 37.59,
+   "vis": 35.8,
+   "hits": 3,
+   "crashed": null,
+   "n": 120
+  },
+  {
+   "course": "tactics-x4",
+   "seed": 110,
+   "g": 2,
+   "ret": 0.29,
+   "vis": 15.8,
+   "hits": 2,
+   "crashed": null,
+   "n": 120
+  },
+  {
+   "course": "tactics-x4",
+   "seed": 110,
+   "g": 3,
+   "ret": -2.14,
+   "vis": 11.7,
+   "hits": 2,
+   "crashed": null,
+   "n": 120
+  },
+  {
+   "course": "tactics-x4",
+   "seed": 110,
+   "g": 4,
+   "ret": 0.81,
+   "vis": 47.2,
+   "hits": 4,
+   "crashed": 8.978,
+   "n": 36
+  },
+  {
+   "course": "tactics-x4",
+   "seed": 110,
+   "g": 5,
+   "ret": 13.71,
+   "vis": 17.5,
+   "hits": 2,
+   "crashed": null,
+   "n": 120
+  },
+  {
+   "course": "tactics-x4",
+   "seed": 110,
+   "g": 6,
+   "ret": 9.4,
+   "vis": 17.5,
+   "hits": 1,
+   "crashed": null,
+   "n": 120
+  },
+  {
+   "course": "tactics-x4",
+   "seed": 110,
+   "g": 7,
+   "ret": 0.6,
+   "vis": 12.5,
+   "hits": 3,
+   "crashed": null,
+   "n": 120
+  },
+  {
+   "course": "tactics-x4",
+   "seed": 110,
+   "g": 8,
+   "ret": -0.66,
+   "vis": 20.0,
+   "hits": 4,
+   "crashed": null,
+   "n": 120
+  },
+  {
+   "course": "tactics-x4",
+   "seed": 110,
+   "g": 9,
+   "ret": 35.0,
+   "vis": 30.8,
+   "hits": 1,
+   "crashed": null,
+   "n": 120
+  },
+  {
+   "course": "tactics-x4",
+   "seed": 110,
+   "g": 10,
+   "ret": -1.66,
+   "vis": 8.3,
+   "hits": 1,
+   "crashed": null,
+   "n": 120
+  },
+  {
+   "course": "tactics-x4",
+   "seed": 110,
+   "g": 11,
+   "ret": 45.34,
+   "vis": 40.0,
+   "hits": 4,
+   "crashed": null,
+   "n": 120
+  },
+  {
+   "course": "tactics-x4",
+   "seed": 111,
+   "g": 0,
+   "ret": -6.8,
+   "vis": 10.9,
+   "hits": 3,
+   "crashed": 22.77,
+   "n": 92
+  },
+  {
+   "course": "tactics-x4",
+   "seed": 111,
+   "g": 1,
+   "ret": 8.94,
+   "vis": 12.5,
+   "hits": 2,
+   "crashed": null,
+   "n": 120
+  },
+  {
+   "course": "tactics-x4",
+   "seed": 111,
+   "g": 2,
+   "ret": 2.19,
+   "vis": 12.5,
+   "hits": 4,
+   "crashed": null,
+   "n": 120
+  },
+  {
+   "course": "tactics-x4",
+   "seed": 111,
+   "g": 3,
+   "ret": 8.64,
+   "vis": 12.5,
+   "hits": 1,
+   "crashed": null,
+   "n": 120
+  },
+  {
+   "course": "tactics-x4",
+   "seed": 111,
+   "g": 4,
+   "ret": 14.79,
+   "vis": 21.7,
+   "hits": 5,
+   "crashed": null,
+   "n": 120
+  },
+  {
+   "course": "tactics-x4",
+   "seed": 111,
+   "g": 5,
+   "ret": 12.85,
+   "vis": 19.2,
+   "hits": 1,
+   "crashed": null,
+   "n": 120
+  },
+  {
+   "course": "tactics-x4",
+   "seed": 111,
+   "g": 6,
+   "ret": 16.44,
+   "vis": 22.5,
+   "hits": 3,
+   "crashed": null,
+   "n": 120
+  },
+  {
+   "course": "tactics-x4",
+   "seed": 111,
+   "g": 7,
+   "ret": 23.13,
+   "vis": 10.0,
+   "hits": 2,
+   "crashed": null,
+   "n": 120
+  },
+  {
+   "course": "tactics-x4",
+   "seed": 111,
+   "g": 8,
+   "ret": 3.32,
+   "vis": 30.9,
+   "hits": 4,
+   "crashed": 16.768,
+   "n": 68
+  },
+  {
+   "course": "tactics-x4",
+   "seed": 111,
+   "g": 9,
+   "ret": 36.84,
+   "vis": 22.5,
+   "hits": 3,
+   "crashed": null,
+   "n": 120
+  },
+  {
+   "course": "tactics-x4",
+   "seed": 111,
+   "g": 10,
+   "ret": -0.15,
+   "vis": 12.5,
+   "hits": 3,
+   "crashed": null,
+   "n": 120
+  },
+  {
+   "course": "tactics-x4",
+   "seed": 111,
+   "g": 11,
+   "ret": 0.04,
+   "vis": 19.2,
+   "hits": 5,
+   "crashed": null,
+   "n": 120
+  },
+  {
+   "course": "town-x4",
+   "seed": 110,
+   "g": 0,
+   "ret": 15.2,
+   "vis": 8.3,
+   "hits": 1,
+   "crashed": null,
+   "n": 120
+  },
+  {
+   "course": "town-x4",
+   "seed": 110,
+   "g": 1,
+   "ret": 47.85,
+   "vis": 28.3,
+   "hits": 1,
+   "crashed": null,
+   "n": 120
+  },
+  {
+   "course": "town-x4",
+   "seed": 110,
+   "g": 2,
+   "ret": 18.88,
+   "vis": 14.2,
+   "hits": 2,
+   "crashed": null,
+   "n": 120
+  },
+  {
+   "course": "town-x4",
+   "seed": 110,
+   "g": 3,
+   "ret": 16.98,
+   "vis": 10.8,
+   "hits": 1,
+   "crashed": null,
+   "n": 120
+  },
+  {
+   "course": "town-x4",
+   "seed": 110,
+   "g": 4,
+   "ret": 41.48,
+   "vis": 38.3,
+   "hits": 6,
+   "crashed": 26.628,
+   "n": 107
+  },
+  {
+   "course": "town-x4",
+   "seed": 110,
+   "g": 5,
+   "ret": 11.61,
+   "vis": 7.5,
+   "hits": 2,
+   "crashed": null,
+   "n": 120
+  },
+  {
+   "course": "town-x4",
+   "seed": 110,
+   "g": 6,
+   "ret": 50.44,
+   "vis": 30.8,
+   "hits": 2,
+   "crashed": null,
+   "n": 120
+  },
+  {
+   "course": "town-x4",
+   "seed": 110,
+   "g": 7,
+   "ret": 1.27,
+   "vis": 8.3,
+   "hits": 3,
+   "crashed": null,
+   "n": 120
+  },
+  {
+   "course": "town-x4",
+   "seed": 110,
+   "g": 8,
+   "ret": 19.91,
+   "vis": 12.5,
+   "hits": 2,
+   "crashed": null,
+   "n": 120
+  },
+  {
+   "course": "town-x4",
+   "seed": 110,
+   "g": 9,
+   "ret": 110.0,
+   "vis": 65.0,
+   "hits": 2,
+   "crashed": null,
+   "n": 120
+  },
+  {
+   "course": "town-x4",
+   "seed": 110,
+   "g": 10,
+   "ret": 37.02,
+   "vis": 31.7,
+   "hits": 2,
+   "crashed": null,
+   "n": 120
+  },
+  {
+   "course": "town-x4",
+   "seed": 110,
+   "g": 11,
+   "ret": 15.88,
+   "vis": 9.2,
+   "hits": 1,
+   "crashed": null,
+   "n": 120
+  },
+  {
+   "course": "town-x4",
+   "seed": 111,
+   "g": 0,
+   "ret": 53.4,
+   "vis": 40.0,
+   "hits": 1,
+   "crashed": null,
+   "n": 120
+  },
+  {
+   "course": "town-x4",
+   "seed": 111,
+   "g": 1,
+   "ret": 20.67,
+   "vis": 17.5,
+   "hits": 1,
+   "crashed": null,
+   "n": 120
+  },
+  {
+   "course": "town-x4",
+   "seed": 111,
+   "g": 2,
+   "ret": 96.39,
+   "vis": 65.8,
+   "hits": 2,
+   "crashed": null,
+   "n": 120
+  },
+  {
+   "course": "town-x4",
+   "seed": 111,
+   "g": 3,
+   "ret": 14.85,
+   "vis": 33.3,
+   "hits": 3,
+   "crashed": 16.258,
+   "n": 66
+  },
+  {
+   "course": "town-x4",
+   "seed": 111,
+   "g": 4,
+   "ret": 17.36,
+   "vis": 35.4,
+   "hits": 4,
+   "crashed": 20.446,
+   "n": 82
+  },
+  {
+   "course": "town-x4",
+   "seed": 111,
+   "g": 5,
+   "ret": 29.96,
+   "vis": 24.2,
+   "hits": 2,
+   "crashed": null,
+   "n": 120
+  },
+  {
+   "course": "town-x4",
+   "seed": 111,
+   "g": 6,
+   "ret": 60.38,
+   "vis": 46.7,
+   "hits": 5,
+   "crashed": null,
+   "n": 120
+  },
+  {
+   "course": "town-x4",
+   "seed": 111,
+   "g": 7,
+   "ret": 3.03,
+   "vis": 7.5,
+   "hits": 2,
+   "crashed": null,
+   "n": 120
+  },
+  {
+   "course": "town-x4",
+   "seed": 111,
+   "g": 8,
+   "ret": 28.54,
+   "vis": 55.0,
+   "hits": 5,
+   "crashed": 14.82,
+   "n": 60
+  },
+  {
+   "course": "town-x4",
+   "seed": 111,
+   "g": 9,
+   "ret": 5.09,
+   "vis": 38.4,
+   "hits": 7,
+   "crashed": 18.032,
+   "n": 73
+  },
+  {
+   "course": "town-x4",
+   "seed": 111,
+   "g": 10,
+   "ret": 43.29,
+   "vis": 28.3,
+   "hits": 3,
+   "crashed": null,
+   "n": 120
+  },
+  {
+   "course": "town-x4",
+   "seed": 111,
+   "g": 11,
+   "ret": 7.15,
+   "vis": 17.5,
+   "hits": 5,
+   "crashed": null,
+   "n": 120
+  }
+ ],
+ "skipped_groups": [],
+ "min_ret_std": 2.0
+}

@@ -23,3 +23,15 @@ mujoco_menagerie/
 # any scratch image at the repo root; documentation images live in docs/
 /*.png
 !docs/*.png
+.course_*.xml
+
+# downloaded real-world assets (Poly Haven, scanned objects, OSM); fetched on demand, not committed
+realism_assets/cache/
+
+# large flight GIFs (published in the Laya Flight Reel artifact instead)
+docs/gifs/v3.3/
+docs/gifs/laya-full-v3.3-*
+docs/gifs/hybrid-v2pursuit-alt-*
+docs/gifs/v3.3-rate/
+docs/gifs/laya-full-v3.3-rt-rate-*
+docs/videos/

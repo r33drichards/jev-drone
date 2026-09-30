@@ -1,0 +1,546 @@
+{
+ "question": "Why does Laya, flying by command, fail to follow the 4x rover that the lookahead teacher follows, and what fixes it?",
+ "hypotheses": {
+  "H1": "Perception: from one 512x384 frame Laya cannot localise the rover (bearing, range) precisely enough to steer at 4x.",
+  "H2": "Control: a held absolute heading, the 120 deg/s yaw-rate cap and 4-7 Hz commands cannot track the 4x rover even with right decisions.",
+  "H3": "Covariate shift: small early errors take Laya to states the teacher never visited, where it has no data and cannot recover (DAgger's case).",
+  "H4": "Under-training: the imitation is not converged (60% top-1, still rising); more steps or data on the same targets would fix it.",
+  "H5": "Partial observability: the teacher's choice depends on privileged information (where the rover will be, the map round corners) that one frame + lidar + speed does not contain, so no student can match it from these inputs.",
+  "H6": "Latency: answers arrive too late (0.1 s compute, up to 0.6 s freshness) for a 4x rover.",
+  "H7": "Action parameterisation: independent marginals over speed / slide / turn and coarse levels (turn +-20/45/90 deg) cannot express the teacher's joint choice.",
+  "H8": "Train/deploy mismatch: the inputs at flight time differ from the recorded training inputs (frame, context keys or semantics, lidar), a bug.",
+  "H9": "Causal confusion (copycat): the context carries the previous command (prev_speed, prev_turn), which in the teacher's data predicts its next choice well; the student learned to lean on it, and in flight its own lagging commands feed back into it (de Haan et al. 2019, 'Causal Confusion in Imitation Learning'; Wen et al. 2020, 'Fighting Copycat Agents').",
+  "H10": "Overfitting: the student memorised the training flights and seeds and does not generalise to new ones."
+ },
+ "evidence": [
+  {
+   "id": "E1",
+   "text": "Teacher, deciding at 4 Hz from privileged state but holding the decided heading between decisions (bestfix), follows the 4x rover 16/16; with blurred T=5 targets decoded (softfix:5) 20/20.",
+   "source": "results/teacher/ (decode bestfix, softfix:5), commit 8bb54f8",
+   "credibility": "high",
+   "ratings": {
+    "H1": "N",
+    "H2": "II",
+    "H3": "N",
+    "H4": "N",
+    "H5": "C",
+    "H6": "I",
+    "H7": "I",
+    "H8": "N",
+    "H9": "N",
+    "H10": "N"
+   },
+   "note": "Held heading + yaw cap + 4 Hz suffice given right decisions (against H2); commands snapped to the command levels still fly (against H7; the turn is continuous in bestfix, so H7 only partly). 0.25 s decisions with no latency: weakly against H6."
+  },
+  {
+   "id": "E2",
+   "text": "Student-vs-teacher diagnostic, paused sim time (no latency): v3.6 fails as in wall clock (rover in view 15-29%, 2-5 hits per 25 s).",
+   "source": "results/teacher-diag/20260930-070513",
+   "credibility": "high",
+   "ratings": {
+    "H1": "C",
+    "H2": "N",
+    "H3": "C",
+    "H4": "C",
+    "H5": "C",
+    "H6": "II",
+    "H7": "C",
+    "H8": "C",
+    "H9": "C",
+    "H10": "N"
+   },
+   "note": "[E16: rover-in-view here counts time after collisions; re-scored in X11]"
+  },
+  {
+   "id": "E3",
+   "text": "v3.6 in its first 3 s (rover in view 100%, states the teacher recorded from): speed 5.0-5.5 vs teacher 5.3-6.3, heading off by 11-32 deg (median), slide 0.2-1.2 vs 1.2-1.8; regret 1-4.",
+   "source": "results/teacher-diag/20260930-070513",
+   "credibility": "high",
+   "ratings": {
+    "H1": "C",
+    "H2": "N",
+    "H3": "I",
+    "H4": "C",
+    "H5": "C",
+    "H6": "N",
+    "H7": "C",
+    "H8": "C",
+    "H9": "C",
+    "H10": "N"
+   },
+   "note": "Errors already present before any drift: against covariate shift as the ROOT cause (it can still compound them). [E16: rover-in-view here counts time after collisions; re-scored in X11]"
+  },
+  {
+   "id": "E4",
+   "text": "After ~3 s v3.6 loses the rover (in view 15-55%) and regret grows; heading lags the teacher's turn into corners (-13 vs -36 deg).",
+   "source": "results/teacher-diag/20260930-070513",
+   "credibility": "high",
+   "ratings": {
+    "H1": "C",
+    "H2": "N",
+    "H3": "C",
+    "H4": "C",
+    "H5": "CC",
+    "H6": "N",
+    "H7": "C",
+    "H8": "C",
+    "H9": "CC",
+    "H10": "N"
+   },
+   "note": "[E16: rover-in-view here counts time after collisions; re-scored in X11]"
+  },
+  {
+   "id": "E5",
+   "text": "Sharp targets (v3.6) vs blurred (v3.5): first-3-s speed 2.5-3.4 -> 5.0-5.5, heading error ~33 -> 11-32 deg, held-out top-1 52% -> 60% (still rising at the end).",
+   "source": "results/teacher-diag/ (045635 vs 070513); v3.5/v3.6 training logs",
+   "credibility": "high",
+   "ratings": {
+    "H1": "N",
+    "H2": "N",
+    "H3": "N",
+    "H4": "C",
+    "H5": "N",
+    "H6": "N",
+    "H7": "C",
+    "H8": "I",
+    "H9": "C",
+    "H10": "N"
+   },
+   "note": "The student tracks what its targets say, so its inputs do carry the signal it trained on: weakly against a gross mismatch bug."
+  },
+  {
+   "id": "E6",
+   "text": "Four iterations of outcome-reward RL (90 sampled flights each) from v3.6: return 11.3, 10.1, 14.3, 9.9; rover in view 16-20%; held-out teacher NLL 1.0 -> 2.1.",
+   "source": "results/rl/iter1-4",
+   "credibility": "medium",
+   "ratings": {
+    "H1": "C",
+    "H2": "N",
+    "H3": "N",
+    "H4": "N",
+    "H5": "C",
+    "H6": "N",
+    "H7": "N",
+    "H8": "C",
+    "H9": "C",
+    "H10": "N"
+   },
+   "note": "Weak: sparse, noisy RL failing is consistent with most hypotheses; it fits a cause no amount of training on these inputs removes. [E16: rover-in-view here counts time after collisions; re-scored in X11]"
+  },
+  {
+   "id": "E7",
+   "text": "At 1x, Laya v3.3 steering the pursuit from its perception (visible/bearing answers) followed the rover 38/48 in wall clock and town 6/6.",
+   "source": "results/laya-steer/README.md (real-time evaluation)",
+   "credibility": "medium",
+   "ratings": {
+    "H1": "I",
+    "H2": "N",
+    "H3": "N",
+    "H4": "N",
+    "H5": "N",
+    "H6": "I",
+    "H7": "N",
+    "H8": "N",
+    "H9": "N",
+    "H10": "N"
+   },
+   "note": "Laya localised the rover well enough at 1x from one frame; 4x needs more precision and anticipation, so only weakly against H1."
+  },
+  {
+   "id": "E8",
+   "text": "X1 audit: flight and training build the same context keys in the same order, same Eye, 512x384 frame, same turn convention; only differences: training frames were JPEG q90, flight frames raw, and prev_speed/prev_turn are the teacher's previous choice in training but the student's own in flight. In the teacher's held-out data, copying prev_turn gets the turn level right 49% (majority 21%), prev_speed the speed 65% (majority 43%); corr 0.77 / 0.68.",
+   "source": "autoresearch/runs/X1.md",
+   "credibility": "high",
+   "ratings": {
+    "H1": "N",
+    "H2": "N",
+    "H3": "N",
+    "H4": "N",
+    "H5": "N",
+    "H6": "N",
+    "H7": "N",
+    "H8": "I",
+    "H9": "CC",
+    "H10": "N"
+   },
+   "note": "No bug-level mismatch (against H8). The copy-the-previous-command baseline nearly equals the student's 60% top-1: the shortcut is available and strong."
+  },
+  {
+   "id": "E9",
+   "text": "X6 copycat probe (v3.6, 600 held-out teacher decisions): turn top-1 56.5% with the recorded previous command, 35.8% with a random other decision's, 35.0% with zeros; speed 66.7 -> 47.7 / 46.5; slide (no previous value in the context) 71.3 -> 68.2 / 68.5. With a foreign previous command the answer still tracks it (corr 0.56 turn, 0.63 speed). Image-only competence: turn 35% (majority 21%), speed 47% (majority 43%).",
+   "source": "autoresearch/runs/X6.md, X6-drone-rover-v3.6.json",
+   "credibility": "high",
+   "ratings": {
+    "H1": "C",
+    "H2": "N",
+    "H3": "C",
+    "H4": "N",
+    "H5": "C",
+    "H6": "N",
+    "H7": "N",
+    "H8": "N",
+    "H9": "CC",
+    "H10": "N"
+   },
+   "note": "Direct test of H9: the student leans on the previous command and follows it even when it is unrelated to the frame. The image-only skill left over is weak, which is also what H1 and H5 predict, so they stay open."
+  },
+  {
+   "id": "E10",
+   "text": "X7 intervention: v3.7 trained without the previous command in its context. Held-out mean top-1 54.9% (v3.6 image-only ~51%, with its shortcut 60%). Diagnostic vs v3.6: rover in view 33% vs 21%, hits 15 vs 20; 3-8 s in view 39% vs 32%, regret 3.0 vs 5.0; 8-25 s in view 20% vs 4%, regret 0.4 vs 2.4; but 0-3 s heading error 31 vs 17 deg. One flight (town-x4 seed 1) kept the rover in view 97% with no hit.",
+   "source": "autoresearch/runs/X7.md; results/teacher-diag/20260930-192034",
+   "credibility": "medium",
+   "ratings": {
+    "H1": "C",
+    "H2": "N",
+    "H3": "N",
+    "H4": "C",
+    "H5": "I",
+    "H6": "N",
+    "H7": "N",
+    "H8": "N",
+    "H9": "C",
+    "H10": "N"
+   },
+   "note": "Removing the shortcut helps after the start (H9 is a real contributor, as predicted) but is not a fix; without the crutch the early steering is worse: the image-only skill is weak (H1 or H4). H5 predicted no flight gain: mildly against. [E16: rover-in-view here counts time after collisions; re-scored in X11]"
+  },
+  {
+   "id": "E11",
+   "text": "v3.6 top-1 on teacher decisions it trained on 65.5% vs held-out flights 59.7% (a 6-point gap); held-out teacher data keeps the previous-command shortcut (56.5% turn with it), so validation cannot see the shortcut, which breaks only when the previous command becomes the student's own.",
+   "source": "v3.6 training log (train_eval vs val); X6",
+   "credibility": "high",
+   "ratings": {
+    "H1": "N",
+    "H2": "N",
+    "H3": "N",
+    "H4": "C",
+    "H5": "N",
+    "H6": "N",
+    "H7": "N",
+    "H8": "N",
+    "H9": "C",
+    "H10": "I"
+   },
+   "note": "Small generalisation gap: not memorisation. The failure is a shortcut that holds in train and validation alike."
+  },
+  {
+   "id": "E12",
+   "text": "X8 intervention: v3.8 trained with the previous command zeroed in half the decisions. Copycat probe: turn top-1 54.7% recorded / 41.3% foreign / 48.2% zeroed (v3.6: 56.5 / 35.8 / 35.0), speed 66.2 / 52.5 / 61.5; the answer's correlation with a foreign previous command 0.42 (v3.6 0.56). Diagnostic: rover in view 41% (v3.6 21%, v3.7 33%); 3-8 s in view 64% with heading error 29 deg (v3.6 32% / 52, v3.7 39% / 46); 8-25 s in view 23%; 16 hits; none of the 6 flights kept the rover all the way.",
+   "source": "autoresearch/runs/X8.md; X6-drone-rover-v3.8-prevdrop.json; results/teacher-diag/20260930-204106",
+   "credibility": "medium",
+   "ratings": {
+    "H1": "I",
+    "H2": "N",
+    "H3": "C",
+    "H4": "C",
+    "H5": "I",
+    "H6": "N",
+    "H7": "N",
+    "H8": "N",
+    "H9": "CC",
+    "H10": "N"
+   },
+   "note": "With the shortcut made unreliable the image-only skill jumps (turn 35% -> 48%) and flights improve most after the start: the shortcut was starving image learning (H9). That the image-only skill can rise this much with the same frames argues against H5 (the frame lacks the information) and against a hard perception ceiling (H1); what remains (23% in view late, 16 hits) fits compounding drift (H3) and more training (H4). [E16: rover-in-view here counts time after collisions; re-scored in X11]"
+  },
+  {
+   "id": "E13",
+   "text": "X4 observability fit (4720 teacher decisions, 24 flights, held out by seed; best of softmax regression / kNN): turn level from TRUE observables 44.7% (majority 26.9%), + memory of 2 previous decisions 46.3%, + privileged future rover positions 45.5%; speed 59.1 / 60.0 / 60.5% (majority 37.8%); slide 69.5 / 69.6 / 71.4% (majority 36.9%). v3.8's image-only turn top-1 (48%, X8) already matches the true-observable model.",
+   "source": "autoresearch/runs/X4-fit.json, X4-data.jsonl, x4_fit.py",
+   "credibility": "medium",
+   "ratings": {
+    "H1": "I",
+    "H2": "N",
+    "H3": "N",
+    "H4": "N",
+    "H5": "II",
+    "H6": "N",
+    "H7": "C",
+    "H8": "N",
+    "H9": "N",
+    "H10": "N"
+   },
+   "note": "Privileged information adds at most 2 points: the teacher's choice is about as predictable from what can be observed (strongly against H5). Laya from pixels already matches a model given the true bearing and range (against H1). The turn tops out near 46% even with perfect information: many candidates score alike, so top-1 against the teacher is a weak yardstick and regret is the one to watch (this fits H7's view that the single-choice target is ill-posed). Medium credibility: simple models on hand features."
+  },
+  {
+   "id": "E14",
+   "text": "X9: continuing v3.8 for another run on the same data (v3.9) made it worse: held-out mean top-1 59.7 -> 57.4%, image-only turn 48.2 -> 44.5%; diagnostic rover in view 41% -> 24% (8-25 s: 23% -> 9%), hits 16 -> 19.",
+   "source": "autoresearch/runs/X9.md; X6-drone-rover-v3.9-prevdrop-cont.json; results/teacher-diag/20260930-214613",
+   "credibility": "high",
+   "ratings": {
+    "H1": "N",
+    "H2": "N",
+    "H3": "C",
+    "H4": "II",
+    "H5": "N",
+    "H6": "N",
+    "H7": "N",
+    "H8": "N",
+    "H9": "N",
+    "H10": "C"
+   },
+   "note": "Under-training predicted a clear rise; held-out and image-only numbers (1000+ decisions) fell: against H4. More passes over the same teacher states hurt (overfitting shows up beyond one budget, H10) and do not reach the states the student drifts into (H3). The 6-flight diagnostic alone is noisy; the held-out drop carries the weight. [E16: rover-in-view here counts time after collisions; re-scored in X11]"
+  },
+  {
+   "id": "E15",
+   "text": "Re-flying the best diagnostic flights with the same model and start (no teacher scoring) gave different outcomes: v3.7 town-x4 seed 1 97% in view / 0 hits -> 52% / 3; v3.8 pockets-x4 seed 1 75% / 2 -> 29% / 4. Sampled RL rollouts and v3.5 town-x4 seed 0 reproduced within a few points.",
+   "source": "results/gifs-best/20260930-221157/runs.jsonl",
+   "credibility": "high",
+   "ratings": {
+    "H1": "N",
+    "H2": "N",
+    "H3": "N",
+    "H4": "N",
+    "H5": "N",
+    "H6": "N",
+    "H7": "N",
+    "H8": "N",
+    "H9": "N",
+    "H10": "N"
+   },
+   "note": "Not diagnostic between hypotheses, but it lowers the weight of single-flight results: GPU inference noise is amplified by the flight dynamics, so a 6-flight diagnostic has wide error bars. Comparisons between models should rest on the held-out / probe numbers (1000+ decisions) and on many flights (the RL collections: 90-120 flights each)."
+  },
+  {
+   "id": "E16",
+   "text": "The human watched the five 'best' model flights: all crash; the top one (rl2 town-x4) clipped into a building and stayed stuck. 'Rover in view %' kept counting after collisions (a drone wedged in a wall with the rover in sight scores), and the RL reward had the same flaw (+1 in view per decision, only -3 per collision, flight continues).",
+   "source": "human review of results/gifs-best/20260930-221157; teacher.rl_fly and teacher.diagnose before commit fixing them",
+   "credibility": "high",
+   "ratings": {
+    "H1": "N",
+    "H2": "N",
+    "H3": "N",
+    "H4": "N",
+    "H5": "N",
+    "H6": "N",
+    "H7": "N",
+    "H8": "N",
+    "H9": "N",
+    "H10": "N"
+   },
+   "note": "A measurement flaw, not evidence between hypotheses: every flight-level comparison so far (E2-E4, E10, E12, E14, the RL collections) used the contaminated metric. The held-out and probe numbers (E5, E9, E13) are unaffected. From here the yardstick is clean tracking (rover in view before the first collision) and first-collision time; RL rollouts end at the first collision. v3.6-v3.9 are being re-scored on 20 flights each (X11)."
+  },
+  {
+   "id": "E17",
+   "text": "X11 clean-tracking evaluation, 20 flights each (5 courses x seeds 0-3, 30 s): v3.6: clean view 4.4\u00b10.3 s, first collision 5.3\u00b10.4 s, collision-free 0/20; v3.7-noprev: clean view 5.7\u00b11.2 s, first collision 6.5\u00b11.2 s, collision-free 0/20; v3.8-prevdrop: clean view 4.6\u00b10.3 s, first collision 5.8\u00b10.7 s, collision-free 0/20; v3.9-prevdrop-cont: clean view 5.3\u00b11.0 s, first collision 6.8\u00b11.3 s, collision-free 1/20. Every 4x student collides within about 5-7 s; the differences between them are within about 1 s.",
+   "source": "results/student-eval/20260930-225518",
+   "credibility": "high",
+   "ratings": {
+    "H1": "N",
+    "H2": "N",
+    "H3": "C",
+    "H4": "N",
+    "H5": "N",
+    "H6": "N",
+    "H7": "N",
+    "H8": "N",
+    "H9": "I",
+    "H10": "N"
+   },
+   "note": "Measured cleanly, the copycat fixes (v3.7, v3.8) buy about a second at most before the first collision: removing the shortcut raised the image-only skill (E9, E12) but does not by itself make the student fly safely at 4x. Against H9 as the main cause of the flight failure (it stays a real, measured shortcut). Everything collides early, in states it drifts into within seconds (H3), and avoidance is not being learned: the next experiments should look at collisions directly."
+  }
+ ],
+ "experiments": [
+  {
+   "id": "X11",
+   "status": "done",
+   "cost": "80 GPU flights (~2 GPU-hours)",
+   "kind": "measurement",
+   "what": "Re-score v3.6, v3.7-noprev, v3.8-prevdrop, v3.9 by clean tracking (seconds with the rover in view before the first collision), first-collision time and collision-free flights: 5 courses x seeds 0-3, 30 s (student_eval).",
+   "predictions": {
+    "H9": "the no-crutch students (v3.7, v3.8) still beat v3.6 on clean tracking",
+    "H4/H10": "v3.9 no better than v3.8",
+    "others": "n/a"
+   },
+   "diagnostic_for": [
+    "H9",
+    "H10"
+   ],
+   "result": "E17"
+  },
+  {
+   "id": "X10",
+   "status": "paused",
+   "cost": "per iteration: 120 GPU rollouts (~3 GPU-hours) + ~0.5 A100-hour",
+   "kind": "test + intervention (H3 vs H4), approved by the human",
+   "what": "Outcome-reward RL (teacher.rl_fly rewards, group-relative advantages) from the better of v3.8-prevdrop / v3.9 (by the X9 diagnostic): 5 courses x seeds 110-111 x groups of 12, groups whose returns differ by less than 2.0 (std) left out, anchor data drone_rover_teacher_sharp_prevdrop; up to 4 iterations. The RL rows carry the student's own previous command, so they are copycat-safe.",
+   "predictions": {
+    "H3": "return and late (8-25 s) rover-in-view rise across iterations (the student learns from the states it actually drifts into)",
+    "H4": "little gain beyond what X9's longer supervised training gives",
+    "H9": "no copycat relapse: the probe's recorded-vs-foreign gap does not grow",
+    "others": "no systematic change"
+   },
+   "diagnostic_for": [
+    "H3",
+    "H4"
+   ],
+   "base": "drone-rover-v3.8-prevdrop/best",
+   "note": "Iteration 1 collected (v3.8, 120 flights) under the flawed reward; stopped before training finished (E16). Restart with the collision-terminated reward from the best model by clean tracking (X11)."
+  },
+  {
+   "id": "X9",
+   "status": "done",
+   "cost": "1 A100-hour training + 7 GPU jobs",
+   "kind": "test (H4 vs H3)",
+   "what": "Continue v3.8-prevdrop for another run of the same length on the same data (drone-rover-v3.9-prevdrop-cont, init v3.8-prevdrop/best), then the copycat probe and the diagnostic.",
+   "predictions": {
+    "H4": "held-out top-1 and image-only top-1 rise further; rover in view after 8 s clearly above v3.8's 23%",
+    "H3": "held-out numbers may rise, but late-flight rover in view stays near 23% (the states it drifts to are still missing from the data)",
+    "H10": "held-out numbers fall or flat while train numbers rise",
+    "others": "no systematic change"
+   },
+   "diagnostic_for": [
+    "H4",
+    "H3",
+    "H10"
+   ],
+   "result": "E14"
+  },
+  {
+   "id": "X8",
+   "status": "done",
+   "cost": "CPU dataset + 1 A100-hour training + 6 GPU diagnostic flights",
+   "kind": "intervention (H9)",
+   "what": "Keep the previous command but drop it out: retrain from v3.4/best on teacher_sharp where each record's prev_speed/prev_turn is replaced by 0/0 with probability 0.5 (ChauffeurNet's past-motion dropout; Wen et al. 2020), then the diagnostic WITH the previous command (the student's own) and the copycat probe.",
+   "predictions": {
+    "H9": "copycat probe: small gap between recorded and foreign previous command; diagnostic at least as good as v3.7 after 3 s and better than v3.7 in the first 3 s (smoothness back without the crutch)",
+    "H1": "image-only top-1 stays ~35% turn; early steering no better than v3.7",
+    "H5": "as H1",
+    "others": "no systematic change"
+   },
+   "diagnostic_for": [
+    "H9",
+    "H1",
+    "H5"
+   ],
+   "run": "drone-rover-v3.8-prevdrop",
+   "result": "E12"
+  },
+  {
+   "id": "X1",
+   "status": "done",
+   "cost": "code audit, minutes",
+   "what": "Audit train vs deploy inputs: for the same simulator state, build the context and frame the way teacher.fly(record=True) recorded them and the way teacher.diagnose / run.py flight feed them; diff state_text keys and values (prev_turn sign and units, lidar sector order, travel_deg), image size, JPEG vs raw, camera pose.",
+   "predictions": {
+    "H8": "a difference appears",
+    "others": "identical inputs"
+   },
+   "diagnostic_for": [
+    "H8"
+   ],
+   "result": "E8"
+  },
+  {
+   "id": "X6",
+   "status": "done",
+   "cost": "GPU, 1 job, ~15 min",
+   "what": "Copycat probe: v3.6 answers 600 held-out teacher decisions (drone_rover_teacher_sharp val) three ways: recorded prev_speed/prev_turn; prev replaced by those of a random other decision; prev set to 0. Measure top-1 vs the teacher and how far the answer follows the injected prev.",
+   "predictions": {
+    "H9": "accuracy drops sharply with shuffled prev (toward the image-only level) and answers track the injected prev",
+    "H1": "small drop; answers follow the image",
+    "H5": "small drop",
+    "others": "small drop"
+   },
+   "diagnostic_for": [
+    "H9",
+    "H1",
+    "H5"
+   ],
+   "result": "E9"
+  },
+  {
+   "id": "X7",
+   "status": "done",
+   "cost": "CPU dataset + 1 A100-hour training + 6 GPU diagnostic flights",
+   "kind": "intervention (H9)",
+   "what": "Retrain from v3.4/best on drone_rover_teacher_sharp with prev_speed/prev_turn removed from the context (drone_rover_teacher_sharp_noprev), same mix and schedule as v3.6 (run drone-rover-v3.7-noprev); then the student-vs-teacher diagnostic (keys without prev) and compare with v3.6.",
+   "predictions": {
+    "H9": "held-out turn top-1 clearly above v3.6's image-only 35% (the model now has to learn from the frame); diagnostic: rover in view and heading error after 3 s clearly better than v3.6, since there is no feedback of its own lag",
+    "H5": "held-out top-1 stays near 35% turn / 47% speed; no flight gain",
+    "H1": "same as H5 at this resolution; X3/X4 separate them",
+    "H4": "a modest rise, with or without prev",
+    "others": "no systematic change"
+   },
+   "diagnostic_for": [
+    "H9",
+    "H5",
+    "H1"
+   ],
+   "result": "E10"
+  },
+  {
+   "id": "X2",
+   "status": "queued",
+   "cost": "CPU, ~30 min",
+   "what": "Teacher with commands quantised exactly as the student outputs them (speed/slide/turn snapped to the levels, turn relative to the nose at decision time, held) on the six 4x courses x 4 seeds.",
+   "predictions": {
+    "H7": "success rate falls clearly below 36/36",
+    "others": "still ~all succeed"
+   },
+   "diagnostic_for": [
+    "H7",
+    "H2"
+   ]
+  },
+  {
+   "id": "X3",
+   "status": "queued",
+   "cost": "GPU, 6 flights x ~15 min",
+   "what": "Oracle-heading hybrid: v3.6 flies in the teacher's world with its own speed and slide but the turn replaced by the teacher's (and, separately, speed/slide from the teacher and turn from Laya).",
+   "predictions": {
+    "H1": "oracle turn fixes most failures; Laya's turn with oracle speed/slide still fails",
+    "H5": "same as H1 (the turn needs privileged anticipation)",
+    "H3": "oracle turn helps early but drift errors in speed/slide still accumulate",
+    "H4": "partial help from either",
+    "others": "little change"
+   },
+   "diagnostic_for": [
+    "H1",
+    "H5",
+    "H3",
+    "H4"
+   ]
+  },
+  {
+   "id": "X4",
+   "status": "done",
+   "cost": "CPU + small analysis",
+   "what": "Observability check: teacher flights (six 4x courses x seeds 20-23) log per decision the TRUE observable features (rover visible, bearing, range, speed, travel, altitude, lidar), the same plus the two previous decisions' observations (memory), and the same plus privileged ones (the rover 1-3 s ahead in the drone's frame, its velocity); softmax regression and kNN predict the teacher's turn / speed / slide level, held out by seed (autoresearch/x4_fit.py).",
+   "predictions": {
+    "H5": "obs+priv predicts the turn far better than obs (the choice needs the future); memory helps only partly",
+    "H1": "true obs already predicts the turn well above Laya's image-only 35% (so the information is in the observation and Laya's perception is what falls short)",
+    "H4": "as H1 (the signal is there; more training should find it)",
+    "others": "n/a"
+   },
+   "diagnostic_for": [
+    "H5",
+    "H1"
+   ],
+   "result": "E13"
+  },
+  {
+   "id": "X5",
+   "status": "deferred",
+   "cost": "GPU, one DAgger round (~2 h collect + 1 h train)",
+   "what": "One DAgger round: v3.6 flies, the teacher labels every state (sharp targets), retrain, re-run the diagnostic.",
+   "predictions": {
+    "H3": "later-seconds regret falls clearly, rover in view rises",
+    "H5": "little gain: labels at the new states are equally unpredictable from the inputs",
+    "H4": "some gain from more data",
+    "others": "little change"
+   },
+   "diagnostic_for": [
+    "H3",
+    "H5",
+    "H4"
+   ],
+   "note": "replaced by X10 (outcome-reward RL from the no-crutch student) at the human's choice; kept as the fallback if X10 stays flat"
+  }
+ ],
+ "conclusions": {
+  "ranking": "see ach.py show",
+  "summary": "With the clean yardstick (X11) every 4x student collides within ~5-7 s, and the copycat fixes gain at most ~1 s: causal confusion (H9) is a real shortcut (held-out and probe evidence) but not the main cause of the flight failure. Rejected or weakened: control (H2), latency (H6), pipeline bug (H8), missing information (H5), perception ceiling (H1), under-training (H4). Leading now: drift into unvisited states (H3) and the collision behaviour itself; the 1x v3.3 (code avoidance reflex + Laya pursuit) finishes 12/12, so what 4x lacks is avoidance at speed. Next: look at where and why the students collide, and resume RL with the collision-terminated reward (X10).",
+  "milestones": [
+   "X4: if true observables predict the teacher's turn well, H5 is rejected and the gap is learnable",
+   "X5 (DAgger from v3.8, with previous-command dropout kept) vs a longer v3.8 run: whichever raises late rover-in-view decides H3 vs H4",
+   "Success milestone: a majority of 4x flights finished in wall clock (laya-cmd-wc)"
+  ]
+ }
+}

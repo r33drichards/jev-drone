@@ -1,0 +1,147 @@
+{
+ "backend": "jev-latest",
+ "args": {
+  "backend": "jev",
+  "model": null,
+  "out": "results/laya/scenes-jev.json",
+  "short": false,
+  "blank_image": false
+ },
+ "correct": 5,
+ "n": 7,
+ "rows": [
+  {
+   "case": "low barrier, all 5 blocked",
+   "ok": true,
+   "latency_s": 0.403,
+   "jev": "climb p=0.93 risk=1.42",
+   "maneuver": "climb",
+   "confidence": 0.93,
+   "probabilities": {
+    "brake": 0.03,
+    "gap_left": 0.0,
+    "climb": 0.95,
+    "reacquire": 0.02,
+    "gap_right": 0.0,
+    "hold_course": 0.0
+   },
+   "risk": 1.56,
+   "target_truly_lost": 0.12,
+   "source": "jev"
+  },
+  {
+   "case": "tall pillar ahead, right wide open",
+   "ok": true,
+   "latency_s": 0.198,
+   "jev": "gap_right p=0.72 risk=1.53",
+   "maneuver": "gap_right",
+   "confidence": 0.52,
+   "probabilities": {
+    "gap_left": 0.02,
+    "climb": 0.31,
+    "brake": 0.05,
+    "reacquire": 0.0,
+    "gap_right": 0.6,
+    "hold_course": 0.02
+   },
+   "risk": 1.61,
+   "target_truly_lost": 0.04,
+   "source": "jev"
+  },
+  {
+   "case": "tall pillar ahead, left wide open",
+   "ok": false,
+   "latency_s": 0.198,
+   "jev": "gap_left p=0.40 risk=1.58",
+   "maneuver": "climb",
+   "confidence": 0.52,
+   "probabilities": {
+    "climb": 0.6,
+    "brake": 0.07,
+    "gap_left": 0.16,
+    "gap_right": 0.11,
+    "hold_course": 0.06,
+    "reacquire": 0.0
+   },
+   "risk": 1.69,
+   "target_truly_lost": 0.04,
+   "source": "jev"
+  },
+  {
+   "case": "target gone 7 s, wide open",
+   "ok": true,
+   "latency_s": 0.235,
+   "jev": "reacquire p=0.96 lost=0.85",
+   "maneuver": "reacquire",
+   "confidence": 0.92,
+   "probabilities": {
+    "gap_right": 0.0,
+    "hold_course": 0.06,
+    "brake": 0.0,
+    "reacquire": 0.93,
+    "climb": 0.01,
+    "gap_left": 0.0
+   },
+   "risk": 0.19,
+   "target_truly_lost": 0.87,
+   "source": "jev"
+  },
+  {
+   "case": "boxed in, close on all sides, tall",
+   "ok": false,
+   "latency_s": 0.238,
+   "jev": "brake p=0.84 risk=1.89",
+   "maneuver": "climb",
+   "confidence": 0.71,
+   "probabilities": {
+    "gap_left": 0.02,
+    "climb": 0.77,
+    "reacquire": 0.0,
+    "brake": 0.16,
+    "gap_right": 0.02,
+    "hold_course": 0.03
+   },
+   "risk": 1.8,
+   "target_truly_lost": 0.04,
+   "source": "jev"
+  },
+  {
+   "case": "all clear, target dead ahead",
+   "ok": true,
+   "latency_s": 0.198,
+   "jev": "hold_course p=0.82 risk=0.46",
+   "maneuver": "hold_course",
+   "confidence": 1.0,
+   "probabilities": {
+    "reacquire": 0.0,
+    "brake": 0.0,
+    "gap_left": 0.0,
+    "climb": 0.0,
+    "gap_right": 0.0,
+    "hold_course": 1.0
+   },
+   "risk": 0.02,
+   "target_truly_lost": 0.03,
+   "source": "jev"
+  },
+  {
+   "case": "brief occlusion 0.6 s, path clear",
+   "ok": true,
+   "latency_s": 0.268,
+   "jev": "muddy p=0.24, lost=0.12",
+   "maneuver": "hold_course",
+   "confidence": 0.22,
+   "probabilities": {
+    "climb": 0.35,
+    "hold_course": 0.35,
+    "gap_right": 0.01,
+    "brake": 0.04,
+    "gap_left": 0.03,
+    "reacquire": 0.22
+   },
+   "risk": 0.91,
+   "target_truly_lost": 0.12,
+   "source": "jev"
+  }
+ ]
+}

@@ -1,0 +1,71 @@
+{
+ "sharpen1": {
+  "frames": 1368,
+  "visible_frames": 884,
+  "sharpen": 1,
+  "visible_auc": 0.9946547436520699,
+  "where_acc": 0.9466374269005848,
+  "bearing_mae_deg": 6.591319685499829,
+  "bearing_mae_deg_within34": 5.0003583893015655,
+  "bearing_mae_deg_always_straight": 20.542425998637796,
+  "bearing_side_acc": 0.9773755656108597,
+  "bearing_spearman": 0.9572769625612229,
+  "bearing_mean_bias_by_band": {
+   "0-10": 0.7849743291517158,
+   "10-25": -3.9885610167467336,
+   "25-45": -8.044184365748075,
+   "45-90": -16.00693699248138
+  },
+  "range_mae_m": 0.5456088171675286,
+  "range_mae_m_constant_median": 0.8380842437574717,
+  "range_bias_m": -0.09877969049794076,
+  "range_spearman": 0.8554001033748654,
+  "speed_cmd_mae_mps": 0.4245506220677294
+ },
+ "sharpen2": {
+  "frames": 1368,
+  "visible_frames": 884,
+  "sharpen": 2,
+  "visible_auc": 0.9946547436520699,
+  "where_acc": 0.9466374269005848,
+  "bearing_mae_deg": 5.269468645830364,
+  "bearing_mae_deg_within34": 4.628216516605289,
+  "bearing_mae_deg_always_straight": 20.542425998637796,
+  "bearing_side_acc": 0.975867269984917,
+  "bearing_spearman": 0.9632226067680746,
+  "bearing_mean_bias_by_band": {
+   "0-10": 0.9702495672660104,
+   "10-25": -1.6830460490493195,
+   "25-45": -4.166488269841422,
+   "45-90": -9.248788845273166
+  },
+  "range_mae_m": 0.502451868078179,
+  "range_mae_m_constant_median": 0.8380842437574717,
+  "range_bias_m": -0.15883934708648623,
+  "range_spearman": 0.8628666487687385,
+  "speed_cmd_mae_mps": 0.3763045554238226
+ },
+ "sharpen3": {
+  "frames": 1368,
+  "visible_frames": 884,
+  "sharpen": 3,
+  "visible_auc": 0.9946547436520699,
+  "where_acc": 0.9466374269005848,
+  "bearing_mae_deg": 5.088021626032343,
+  "bearing_mae_deg_within34": 4.542070559005198,
+  "bearing_mae_deg_always_straight": 20.542425998637796,
+  "bearing_side_acc": 0.975867269984917,
+  "bearing_spearman": 0.9643326141446729,
+  "bearing_mean_bias_by_band": {
+   "0-10": 0.7544169021229974,
+   "10-25": -1.1334590194045397,
+   "25-45": -3.6474405065007107,
+   "45-90": -8.43672846599217
+  },
+  "range_mae_m": 0.4988121932495516,
+  "range_mae_m_constant_median": 0.8380842437574717,
+  "range_bias_m": -0.16534230905039246,
+  "range_spearman": 0.8613423602352624,
+  "speed_cmd_mae_mps": 0.37322604988560576
+ }
+}
