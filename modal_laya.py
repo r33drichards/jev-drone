@@ -987,10 +987,11 @@ def rl_advantages(flights, gamma):
 
 
 @app.function(cpu=2, memory=16384, timeout=6 * 60 * 60, volumes={"/data": data_vol})
-def rl_coordinator(jobs: list, set_name: str, gamma: float, meta: dict):
+def rl_coordinator(jobs: list, set_name: str, gamma: float, meta: dict, min_ret_std: float = 0.0):
     """Fly every rollout job, compute the group advantages, write /data/vqa/<set_name>/train.jsonl (policy-
     gradient rows for laya-vision's pg_loss: label = the level taken, advantage) and meta.json (every flight's
-    return, rover in view, collisions); _READY last. Create-only."""
+    return, rover in view, collisions); _READY last. Create-only. Groups whose flights' returns differ by less
+    than `min_ret_std` (standard deviation) carry no learning signal and are left out."""
     _enter()
     import collections, random, command, teacher
     meta = dict(meta, reward_weights=teacher.RL_W, band_m=teacher.RL_BAND_M)
@@ -1010,13 +1011,17 @@ def rl_coordinator(jobs: list, set_name: str, gamma: float, meta: dict):
             r["course"], r["seed"], r["g"], r["return"], r["visible_pct"], r["collisions"], r["crashed_at_s"],
             r["wall_s"]), flush=True)
     qs = command.question()
-    rows, flights = [], []
+    import numpy as np
+    rows, flights, skipped = [], [], []
     for (course, seed), fl in sorted(groups.items()):
+        use = float(np.std([f["return"] for f in fl])) >= min_ret_std
+        if not use:
+            skipped.append([course, seed])
         for f, adv in zip(fl, rl_advantages(fl, gamma)):
             flights.append({"course": course, "seed": seed, "g": f["g"], "ret": f["return"],
                             "vis": f["visible_pct"], "hits": f["collisions"], "crashed": f["crashed_at_s"],
                             "n": len(f["decisions"])})
-            for d, (rtg, a) in zip(f["decisions"], adv):
+            for d, (rtg, a) in zip(f["decisions"], adv if use else []):
                 for q, k in d["take"].items():
                     rows.append({"id": "%s-%s" % (d["stem"], q), "image": "images/%s.jpg" % d["stem"],
                                  "question": qs[q], "state_text": d["state_text"], "label": int(k),
@@ -1027,7 +1032,8 @@ def rl_coordinator(jobs: list, set_name: str, gamma: float, meta: dict):
     with open(os.path.join(base, "train.jsonl"), "w") as fh:
         for r in rows:
             fh.write(json.dumps(r) + "\n")
-    json.dump(dict(meta, rows=len(rows), flights=flights), open(os.path.join(base, "meta.json"), "w"), indent=1)
+    json.dump(dict(meta, rows=len(rows), flights=flights, skipped_groups=skipped, min_ret_std=min_ret_std),
+              open(os.path.join(base, "meta.json"), "w"), indent=1)
     open(os.path.join(base, "_READY"), "w").close()
     data_vol.commit()
     print("wrote %s: %d rows from %d flights" % (base, len(rows), len(flights)), flush=True)
@@ -1036,14 +1042,14 @@ def rl_coordinator(jobs: list, set_name: str, gamma: float, meta: dict):
 @app.local_entrypoint()
 def rl_collect(model: str, set_name: str, courses: str = "town-x4,mixed-x4,pockets-x4,tactics-x4,no-climb-x4",
                seeds: str = "100,101,102", group: int = 6, seconds: float = 30.0, temp: float = 1.0,
-               gamma: float = 0.95):
+               gamma: float = 0.95, min_ret_std: float = 0.0):
     """One RL iteration's rollouts: `group` sampled flights of `model` per (course, seed), on a Modal coordinator
     (run with --detach); the dataset lands in /data/vqa/<set_name>."""
     jobs = [(c, int(s), g, seconds, model, set_name, temp) for c in courses.split(",") for s in seeds.split(",")
             for g in range(group)]
     fc = rl_coordinator.spawn(jobs, set_name, gamma, {"model": model, "courses": courses, "seeds": seeds,
                                                       "group": group, "seconds": seconds, "temp": temp,
-                                                      "gamma": gamma})
+                                                      "gamma": gamma}, min_ret_std)
     print("rl coordinator", fc.object_id, "for", len(jobs), "rollouts ->", set_name)
 
 

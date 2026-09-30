@@ -261,6 +261,23 @@
  ],
  "experiments": [
   {
+   "id": "X10",
+   "status": "queued (after X9)",
+   "cost": "per iteration: 120 GPU rollouts (~3 GPU-hours) + ~0.5 A100-hour",
+   "kind": "test + intervention (H3 vs H4), approved by the human",
+   "what": "Outcome-reward RL (teacher.rl_fly rewards, group-relative advantages) from the better of v3.8-prevdrop / v3.9 (by the X9 diagnostic): 5 courses x seeds 110-111 x groups of 12, groups whose returns differ by less than 2.0 (std) left out, anchor data drone_rover_teacher_sharp_prevdrop; up to 4 iterations. The RL rows carry the student's own previous command, so they are copycat-safe.",
+   "predictions": {
+    "H3": "return and late (8-25 s) rover-in-view rise across iterations (the student learns from the states it actually drifts into)",
+    "H4": "little gain beyond what X9's longer supervised training gives",
+    "H9": "no copycat relapse: the probe's recorded-vs-foreign gap does not grow",
+    "others": "no systematic change"
+   },
+   "diagnostic_for": [
+    "H3",
+    "H4"
+   ]
+  },
+  {
    "id": "X9",
    "status": "running",
    "cost": "1 A100-hour training + 7 GPU jobs",
@@ -402,7 +419,7 @@
   },
   {
    "id": "X5",
-   "status": "queued",
+   "status": "deferred",
    "cost": "GPU, one DAgger round (~2 h collect + 1 h train)",
    "what": "One DAgger round: v3.6 flies, the teacher labels every state (sharp targets), retrain, re-run the diagnostic.",
    "predictions": {
@@ -415,7 +432,8 @@
     "H3",
     "H5",
     "H4"
-   ]
+   ],
+   "note": "replaced by X10 (outcome-reward RL from the no-crutch student) at the human's choice; kept as the fallback if X10 stays flat"
   }
  ],
  "conclusions": {
