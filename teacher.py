@@ -310,6 +310,95 @@ def diagnose(course, seed=0, seconds=35.0, model=None, alt=1.6):
             "wall_s": round(time.time() - wall0, 1)}
 
 
+RL_W = {"visible": 1.0, "band": 0.5, "hit": -3.0, "crash": -10.0, "path": 0.2}   # rl_fly's reward weights
+RL_BAND_M = (2.0, 8.0)       # standoff that counts as "with the rover"
+
+
+def rl_fly(course, seed=0, seconds=30.0, model=None, sample_seed=0, temp=1.0, alt=1.6, student=None):
+    """One on-policy rollout for outcome-reward RL (RLVR): the student flies the course in the teacher's world,
+    sim time paused for its answers, SAMPLING each command (speed, slide, turn level) from its own answer
+    probabilities (sharpened or flattened by `temp`), and every decision interval (DECIDE_S) earns a verifiable
+    reward from the simulator: rover in view at its end (RL_W visible), standoff within RL_BAND_M (band), new
+    collisions (hit), a crash that ends the flight (crash), and potential-based shaping on the path distance round
+    walls to the rover (NavGrid; path x the metres closed, which leaves the optimal policy unchanged). -> dict with
+    per-decision samples (JPEG, context, taken level indices, reward, reward components) and a summary."""
+    import io, command, flight, avoid
+    from PIL import Image
+    student = student or command.LayaCommand(model)
+    rng = np.random.default_rng(1000003 * seed + sample_seed)
+    w = World(course, seed)
+    eye = flight.Eye(w.m, rgb_size=(512, 384))
+    r0 = np.random.default_rng(seed)
+    if hasattr(w.c, "start_pose"):
+        w.d.qpos[:7] = w.c.start_pose(r0, alt)
+    else:
+        w.d.qpos[:3] = [1.5 + r0.uniform(-.3, .3), r0.uniform(-.5, .5), alt]
+        w.d.qpos[3:7] = [1, 0, 0, 0]
+    mujoco.mj_forward(w.m, w.d)
+    w.nav = NavGrid(w)
+    levels = {"cmd_speed": command.SPEED_LEVELS, "cmd_slide": command.SLIDE_LEVELS, "cmd_turn": command.TURN_LEVELS}
+
+    def potential(t):
+        return -RL_W["path"] * w.nav.dist(w.nav.field(w.c.rover_pose(t)), w.d.qpos[:2])
+
+    per = int(DECIDE_S / DT)
+    samples, prev, cmd, hit_objs, grounded = [], (0.0, 0.0), (0.5, 0.0, 0.0), set(), 0
+    crashed_at, hits_total = None, 0
+    wall0 = time.time()
+    phi = potential(0.0)
+    n = int(seconds / DT)
+    i = 0
+    while i < n and crashed_at is None:
+        t = i * DT
+        pos, yaw = w.d.qpos[:3].copy(), _yaw(w.d.qpos[3:7])
+        scene = eye.look(w.d, pos, yaw, t)
+        sp, rel = avoid.travel(w.d.qvel[:3], yaw)
+        ctx = {"altitude_m": round(float(pos[2]), 2), "speed_mps": round(sp, 2), "travel_deg": round(rel, 0),
+               "prev_speed": round(float(prev[0]), 1), "prev_turn": round(float(prev[1]), 0),
+               "lidar": avoid.sensor(scene)}
+        p = student.probs(eye.last_rgb, ctx)
+        take = {}
+        for q, pq in p.items():
+            pq = np.asarray(pq, dtype=float) ** (1.0 / temp)
+            take[q] = int(rng.choice(len(pq), p=pq / pq.sum()))
+        val = {q: levels[q][k] for q, k in take.items()}
+        cmd = (val["cmd_speed"], val["cmd_slide"], 0.0, yaw + np.deg2rad(val["cmd_turn"]))
+        w._sp = None
+        new_hits = 0
+        for j in range(per):
+            hit = w.step(cmd, (i + j) * DT, j)
+            if hit is not None and hit not in hit_objs:
+                hit_objs.add(hit)
+                new_hits += 1
+            if w.d.qpos[2] < 0.35:
+                grounded += 1
+                if grounded > 750:
+                    crashed_at = (i + j) * DT
+                    break
+            else:
+                grounded = max(0, grounded - 2)
+        i += per
+        t_end = i * DT
+        seen, dist = w.sees_rover(t_end)
+        phi_next = potential(t_end)
+        comp = {"visible": float(seen), "band": float(RL_BAND_M[0] <= dist <= RL_BAND_M[1]),
+                "hit": float(new_hits), "crash": float(crashed_at is not None), "path": 0.0}
+        r = sum(RL_W[k] * comp[k] for k in ("visible", "band", "hit", "crash")) + (phi_next - phi)
+        comp["path"] = round(phi_next - phi, 3)
+        phi = phi_next
+        hits_total += new_hits
+        buf = io.BytesIO()
+        Image.fromarray(eye.last_rgb).save(buf, "JPEG", quality=90)
+        samples.append({"t": round(t, 2), "jpeg": buf.getvalue(), "context": ctx, "take": take, "probs": p,
+                        "reward": round(float(r), 3), "components": comp})
+        prev = (val["cmd_speed"], val["cmd_turn"])
+    return {"course": course, "seed": seed, "sample_seed": sample_seed, "model": model, "temp": temp,
+            "return": round(float(sum(s["reward"] for s in samples)), 2), "collisions": hits_total,
+            "crashed_at_s": crashed_at, "visible_pct": round(100 * float(np.mean([s["components"]["visible"]
+                                                                                  for s in samples])), 1),
+            "decisions": len(samples), "wall_s": round(time.time() - wall0, 1), "samples": samples}
+
+
 def fly(course, seed=0, seconds=60.0, alt=1.6, path=True, record=False, decode="best"):
     """The teacher flies the course itself (the ceiling check). -> an episode-like result dict. `path`: score
     the path distance on a NavGrid (else the straight-line distance, the first version). `record`: also render

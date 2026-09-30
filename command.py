@@ -78,6 +78,13 @@ class LayaCommand:
         self.warmup_s = round(time.time() - t0, 2)
         self.answer(blank, ctx)
 
+    def probs(self, frame, context):
+        """Each question's probability per level (the policy RL samples from)."""
+        import laya_pursuit
+        a = self.agent.predict(laya_pursuit.v3_state(frame, context, keys=CMD_KEYS), self.qs)["answers"]
+        return {q: [float(a[q]["probabilities"][str(i)]) for i in range(len(levels))]
+                for q, levels in (("cmd_speed", SPEED_LEVELS), ("cmd_slide", SLIDE_LEVELS), ("cmd_turn", TURN_LEVELS))}
+
     def answer(self, frame, context):
         import laya_pursuit
         a = self.agent.predict(laya_pursuit.v3_state(frame, context, keys=CMD_KEYS), self.qs)["answers"]

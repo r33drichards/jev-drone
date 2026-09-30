@@ -791,6 +791,112 @@ def teacher_ceiling(courses: str = "mixed-x4,no-climb-x4,pockets-x4,tactics-x4,t
 ROVER_SET_TEACHER_SHARP = ROVER_SET_TEACHER + "_sharp"
 
 
+@app.function(gpu=["L4", "A10G"], cpu=4, memory=16384, timeout=60 * 60, max_containers=GPU_MAX,
+              volumes={"/cache/hf": hf_vol, "/ckpt": ckpt_vol.read_only(), "/data": data_vol})
+def rl_rollout_job(course: str, seed: int, g: int, seconds: float, model: str, set_name: str, temp: float = 1.0):
+    """One sampled rollout (teacher.rl_fly): its frames to /data/vqa/<set_name>/images, its decisions back (no
+    advantages yet: those need the whole group)."""
+    os.environ["MUJOCO_GL"] = os.environ["PYOPENGL_PLATFORM"] = "egl"
+    _enter()
+    import teacher, command
+    r = teacher.rl_fly(course, seed, seconds, model=model, sample_seed=g, temp=temp)
+    base = "/data/vqa/%s/images" % set_name
+    os.makedirs(base, exist_ok=True)
+    decs = []
+    for s in r.pop("samples"):
+        stem = "rl-%s-%d-%d-%06.2f" % (course, seed, g, s["t"])
+        open(os.path.join(base, stem + ".jpg"), "wb").write(s["jpeg"])
+        decs.append({"stem": stem, "t": s["t"], "reward": s["reward"], "take": s["take"], "probs": s["probs"],
+                     "components": s["components"],
+                     "state_text": json.dumps({k: s["context"].get(k) for k in command.CMD_KEYS})})
+    data_vol.commit()
+    return json.dumps(dict(r, g=g, decisions=decs), default=float)
+
+
+def rl_advantages(flights, gamma):
+    """GRPO-style advantages for one group (same course and seed, different samples): each decision's
+    discounted reward-to-go, standardised against the group's flights still flying at the same decision index
+    (a time-aligned group baseline), clipped to +-3. -> per flight, a list of (rtg, advantage)."""
+    import numpy as np
+    rtg = []
+    for f in flights:
+        acc, out = 0.0, []
+        for d in reversed(f["decisions"]):
+            acc = d["reward"] + gamma * acc
+            out.append(acc)
+        rtg.append(out[::-1])
+    res = [[] for _ in flights]
+    for k in range(max(len(x) for x in rtg)):
+        alive = [i for i, x in enumerate(rtg) if len(x) > k]
+        vals = np.array([rtg[i][k] for i in alive])
+        mu, sd = vals.mean(), vals.std()
+        for i in alive:
+            a = 0.0 if len(alive) < 2 or sd < 1e-6 else float(np.clip((rtg[i][k] - mu) / sd, -3, 3))
+            res[i].append((round(rtg[i][k], 3), round(a, 4)))
+    return res
+
+
+@app.function(cpu=2, memory=16384, timeout=6 * 60 * 60, volumes={"/data": data_vol})
+def rl_coordinator(jobs: list, set_name: str, gamma: float, meta: dict):
+    """Fly every rollout job, compute the group advantages, write /data/vqa/<set_name>/train.jsonl (policy-
+    gradient rows for laya-vision's pg_loss: label = the level taken, advantage) and meta.json (every flight's
+    return, rover in view, collisions); _READY last. Create-only."""
+    _enter()
+    import collections, random, command, teacher
+    meta = dict(meta, reward_weights=teacher.RL_W, band_m=teacher.RL_BAND_M)
+    base = "/data/vqa/%s" % set_name
+    if os.path.exists(os.path.join(base, "_READY")):
+        raise SystemExit("%s already exists" % base)
+    calls = [rl_rollout_job.spawn(*j) for j in jobs]
+    groups = collections.defaultdict(list)
+    for j, fc in zip(jobs, calls):
+        r = _get(fc)
+        if isinstance(r, Exception):
+            print("FAILED", j, repr(r)[:300], flush=True)
+            continue
+        r = json.loads(r)
+        groups[(r["course"], r["seed"])].append(r)
+        print("%-11s seed=%d g=%d return=%7.1f vis=%5.1f%% hits=%d crashed=%s wall=%ss" % (
+            r["course"], r["seed"], r["g"], r["return"], r["visible_pct"], r["collisions"], r["crashed_at_s"],
+            r["wall_s"]), flush=True)
+    qs = command.question()
+    rows, flights = [], []
+    for (course, seed), fl in sorted(groups.items()):
+        for f, adv in zip(fl, rl_advantages(fl, gamma)):
+            flights.append({"course": course, "seed": seed, "g": f["g"], "ret": f["return"],
+                            "vis": f["visible_pct"], "hits": f["collisions"], "crashed": f["crashed_at_s"],
+                            "n": len(f["decisions"])})
+            for d, (rtg, a) in zip(f["decisions"], adv):
+                for q, k in d["take"].items():
+                    rows.append({"id": "%s-%s" % (d["stem"], q), "image": "images/%s.jpg" % d["stem"],
+                                 "question": qs[q], "state_text": d["state_text"], "label": int(k),
+                                 "advantage": a, "rtg": rtg, "reward": d["reward"], "p_taken": d["probs"][q][k],
+                                 "course": course, "seed": seed, "g": f["g"], "t": d["t"]})
+    random.Random(0).shuffle(rows)
+    os.makedirs(base, exist_ok=True)       # the rollout containers made it; this one has not reloaded
+    with open(os.path.join(base, "train.jsonl"), "w") as fh:
+        for r in rows:
+            fh.write(json.dumps(r) + "\n")
+    json.dump(dict(meta, rows=len(rows), flights=flights), open(os.path.join(base, "meta.json"), "w"), indent=1)
+    open(os.path.join(base, "_READY"), "w").close()
+    data_vol.commit()
+    print("wrote %s: %d rows from %d flights" % (base, len(rows), len(flights)), flush=True)
+
+
+@app.local_entrypoint()
+def rl_collect(model: str, set_name: str, courses: str = "town-x4,mixed-x4,pockets-x4,tactics-x4,no-climb-x4",
+               seeds: str = "100,101,102", group: int = 6, seconds: float = 30.0, temp: float = 1.0,
+               gamma: float = 0.95):
+    """One RL iteration's rollouts: `group` sampled flights of `model` per (course, seed), on a Modal coordinator
+    (run with --detach); the dataset lands in /data/vqa/<set_name>."""
+    jobs = [(c, int(s), g, seconds, model, set_name, temp) for c in courses.split(",") for s in seeds.split(",")
+            for g in range(group)]
+    fc = rl_coordinator.spawn(jobs, set_name, gamma, {"model": model, "courses": courses, "seeds": seeds,
+                                                      "group": group, "seconds": seconds, "temp": temp,
+                                                      "gamma": gamma})
+    print("rl coordinator", fc.object_id, "for", len(jobs), "rollouts ->", set_name)
+
+
 @app.function(cpu=2, memory=8192, timeout=30 * 60, volumes={"/data": data_vol})
 def build_rover_set_teacher_sharp_job():
     """drone_rover_teacher with each question's target on the teacher's own choice instead of the T=5 blend of
