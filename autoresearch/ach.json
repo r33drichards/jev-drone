@@ -9,7 +9,8 @@
   "H6": "Latency: answers arrive too late (0.1 s compute, up to 0.6 s freshness) for a 4x rover.",
   "H7": "Action parameterisation: independent marginals over speed / slide / turn and coarse levels (turn +-20/45/90 deg) cannot express the teacher's joint choice.",
   "H8": "Train/deploy mismatch: the inputs at flight time differ from the recorded training inputs (frame, context keys or semantics, lidar), a bug.",
-  "H9": "Causal confusion (copycat): the context carries the previous command (prev_speed, prev_turn), which in the teacher's data predicts its next choice well; the student learned to lean on it, and in flight its own lagging commands feed back into it (de Haan et al. 2019, 'Causal Confusion in Imitation Learning'; Wen et al. 2020, 'Fighting Copycat Agents')."
+  "H9": "Causal confusion (copycat): the context carries the previous command (prev_speed, prev_turn), which in the teacher's data predicts its next choice well; the student learned to lean on it, and in flight its own lagging commands feed back into it (de Haan et al. 2019, 'Causal Confusion in Imitation Learning'; Wen et al. 2020, 'Fighting Copycat Agents').",
+  "H10": "Overfitting: the student memorised the training flights and seeds and does not generalise to new ones."
  },
  "evidence": [
   {
@@ -26,7 +27,8 @@
     "H6": "I",
     "H7": "I",
     "H8": "N",
-    "H9": "N"
+    "H9": "N",
+    "H10": "N"
    },
    "note": "Held heading + yaw cap + 4 Hz suffice given right decisions (against H2); commands snapped to the command levels still fly (against H7; the turn is continuous in bestfix, so H7 only partly). 0.25 s decisions with no latency: weakly against H6."
   },
@@ -44,7 +46,8 @@
     "H6": "II",
     "H7": "C",
     "H8": "C",
-    "H9": "C"
+    "H9": "C",
+    "H10": "N"
    }
   },
   {
@@ -61,7 +64,8 @@
     "H6": "N",
     "H7": "C",
     "H8": "C",
-    "H9": "C"
+    "H9": "C",
+    "H10": "N"
    },
    "note": "Errors already present before any drift: against covariate shift as the ROOT cause (it can still compound them)."
   },
@@ -79,7 +83,8 @@
     "H6": "N",
     "H7": "C",
     "H8": "C",
-    "H9": "CC"
+    "H9": "CC",
+    "H10": "N"
    }
   },
   {
@@ -96,7 +101,8 @@
     "H6": "N",
     "H7": "C",
     "H8": "I",
-    "H9": "C"
+    "H9": "C",
+    "H10": "N"
    },
    "note": "The student tracks what its targets say, so its inputs do carry the signal it trained on: weakly against a gross mismatch bug."
   },
@@ -114,7 +120,8 @@
     "H6": "N",
     "H7": "N",
     "H8": "C",
-    "H9": "C"
+    "H9": "C",
+    "H10": "N"
    },
    "note": "Weak: sparse, noisy RL failing is consistent with most hypotheses; it fits a cause no amount of training on these inputs removes."
   },
@@ -132,7 +139,8 @@
     "H6": "I",
     "H7": "N",
     "H8": "N",
-    "H9": "N"
+    "H9": "N",
+    "H10": "N"
    },
    "note": "Laya localised the rover well enough at 1x from one frame; 4x needs more precision and anticipation, so only weakly against H1."
   },
@@ -150,7 +158,8 @@
     "H6": "N",
     "H7": "N",
     "H8": "I",
-    "H9": "CC"
+    "H9": "CC",
+    "H10": "N"
    },
    "note": "No bug-level mismatch (against H8). The copy-the-previous-command baseline nearly equals the student's 60% top-1: the shortcut is available and strong."
   },
@@ -168,7 +177,8 @@
     "H6": "N",
     "H7": "N",
     "H8": "N",
-    "H9": "CC"
+    "H9": "CC",
+    "H10": "N"
    },
    "note": "Direct test of H9: the student leans on the previous command and follows it even when it is unrelated to the frame. The image-only skill left over is weak, which is also what H1 and H5 predict, so they stay open."
   },
@@ -186,12 +196,50 @@
     "H6": "N",
     "H7": "N",
     "H8": "N",
-    "H9": "C"
+    "H9": "C",
+    "H10": "N"
    },
    "note": "Removing the shortcut helps after the start (H9 is a real contributor, as predicted) but is not a fix; without the crutch the early steering is worse: the image-only skill is weak (H1 or H4). H5 predicted no flight gain: mildly against."
+  },
+  {
+   "id": "E11",
+   "text": "v3.6 top-1 on teacher decisions it trained on 65.5% vs held-out flights 59.7% (a 6-point gap); held-out teacher data keeps the previous-command shortcut (56.5% turn with it), so validation cannot see the shortcut, which breaks only when the previous command becomes the student's own.",
+   "source": "v3.6 training log (train_eval vs val); X6",
+   "credibility": "high",
+   "ratings": {
+    "H1": "N",
+    "H2": "N",
+    "H3": "N",
+    "H4": "C",
+    "H5": "N",
+    "H6": "N",
+    "H7": "N",
+    "H8": "N",
+    "H9": "C",
+    "H10": "I"
+   },
+   "note": "Small generalisation gap: not memorisation. The failure is a shortcut that holds in train and validation alike."
   }
  ],
  "experiments": [
+  {
+   "id": "X8",
+   "status": "queued",
+   "cost": "CPU dataset + 1 A100-hour training + 6 GPU diagnostic flights",
+   "kind": "intervention (H9)",
+   "what": "Keep the previous command but drop it out: retrain from v3.4/best on teacher_sharp where each record's prev_speed/prev_turn is replaced by 0/0 with probability 0.5 (ChauffeurNet's past-motion dropout; Wen et al. 2020), then the diagnostic WITH the previous command (the student's own) and the copycat probe.",
+   "predictions": {
+    "H9": "copycat probe: small gap between recorded and foreign previous command; diagnostic at least as good as v3.7 after 3 s and better than v3.7 in the first 3 s (smoothness back without the crutch)",
+    "H1": "image-only top-1 stays ~35% turn; early steering no better than v3.7",
+    "H5": "as H1",
+    "others": "no systematic change"
+   },
+   "diagnostic_for": [
+    "H9",
+    "H1",
+    "H5"
+   ]
+  },
   {
    "id": "X1",
    "status": "done",
